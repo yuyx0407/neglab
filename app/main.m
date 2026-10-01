@@ -384,6 +384,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     NSTextField *_lblT0, *_lblFit, *_lblHealth;
     NegCard *_cardZero, *_cardGamma, *_cardOut;
     NSSegmentedControl *_segView, *_segZero;
+    NSButton *_chkLock;
     NSButton *_btnGrey, *_btnUndo, *_btnClearCal;
     NegSliderRow *_slGammaR, *_slGammaB, *_slExposure, *_slBlack;
     NSScrollView *_sidebar;
@@ -393,6 +394,8 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     NSImage *_imgOriginal, *_imgResult;
     double _t0[3];          // 手动点选的零点
     double _autoT0[3];      // 自动零点，载入时算一次
+    double _lockedT0[3];    // 被锁住的零点，供同一批的其余帧共用
+    BOOL _hasLockedT0;
     double _gamma[3];
     double _offset[3];
     double _lRef;
@@ -491,9 +494,16 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     _lblT0 = mkLabel1(@"T0 —", F_VALUE(), C_MUT());
     _lblT0.lineBreakMode = NSLineBreakByTruncatingTail;
 
+    _chkLock = [NSButton checkboxWithTitle:@"锁住，供同一批的其余帧共用" target:self
+                                    action:@selector(lockToggled:)];
+    _chkLock.controlSize = NSControlSizeSmall;
+    _chkLock.font = F_SMALL();
+
     NegCard *cardZero = mkCard(@"① 零点　每帧都要重定",
-        @[_segZero, btnBase, _lblT0,
-          mkHelp(@"零点 = 未曝光片基的透过率。有片基就点它，最准；自动估计会被画面里的强光带偏。")]);
+        @[_segZero, btnBase, _lblT0, _chkLock,
+          mkHelp(@"零点 = 未曝光片基的透过率。有片基就点它，最准；自动估计会被画面里的强光带偏。"
+                 @"店家扫不到片基时，在胶卷开头空拍一格（盖着镜头盖按一次快门），"
+                 @"那一格就是纯片基 —— 点它，再勾上这里。")]);
 
     // ── ② 斜率 γ ──
     _btnGrey = mkSymbolButton(@"eyedropper", @"点中性灰（0 块）", self, @selector(armGrey:));
@@ -754,6 +764,8 @@ static NSString *const TB_HELP  = @"help";
             self->_canvas.picking = NO;
             self->_currentPath = path;
             self->_segZero.selectedSegment = 0;
+            self->_hasLockedT0 = NO;
+            self->_chkLock.state = NSControlStateValueOff;
             self->_lblFile.stringValue = path.lastPathComponent;
             NSNumber *sz = [[NSFileManager defaultManager]
                             attributesOfItemAtPath:path error:nil][NSFileSize];
@@ -872,15 +884,38 @@ static NSString *const TB_HELP  = @"help";
     [self viewChanged:nil];
 }
 
-// ── 解 γ ───────────────────────────────────────────────────────────────────
+// ── 零点 ───────────────────────────────────────────────────────────────────
 // 自动零点在载入时就算好并缓存。它是「最亮 0.05% 的均值」，要过一遍 3×3 中值 +
 // 两趟统计，拖动滑杆时每帧重算没必要，也会卡。
 - (void)curT0:(double *)t0 {
+    // ① 锁住的零点优先：店家把画幅裁掉、片基扫不进来时，用同批里某一帧
+    //    （通常是专门空拍的那一格纯片基）量到的值，套给其余帧。
+    //    这在数学上成立的前提是：同一批扫描里，片基在扫描件上的读数不变 ——
+    //    也就是店家没有开逐帧自动曝光 / 自动白平衡。
+    if (_hasLockedT0) {
+        for (int c = 0; c < 3; c++) t0[c] = _lockedT0[c];
+        return;
+    }
     if (_haveBase) {
         for (int c = 0; c < 3; c++) t0[c] = _t0[c];
         return;
     }
     for (int c = 0; c < 3; c++) t0[c] = _autoT0[c];
+}
+
+- (void)lockToggled:(id)s {
+    if (_chkLock.state == NSControlStateValueOn) {
+        double t[3];
+        _hasLockedT0 = NO;          // 先取「当前算出来的」那个值
+        [self curT0:t];
+        for (int c = 0; c < 3; c++) _lockedT0[c] = t[c];
+        _hasLockedT0 = YES;
+        [self setStatus:@"零点已锁住，之后每一帧都用它。换卷、换店家请先取消勾选。"];
+    } else {
+        _hasLockedT0 = NO;
+        [self setStatus:@"零点已解锁，回到逐帧单独估计。"];
+    }
+    [self renderViews];
 }
 
 - (void)doFit:(id)sender {
@@ -990,6 +1025,13 @@ static NSString *const TB_HELP  = @"help";
     _gamma[2] = [g[2] doubleValue];
     for (int c = 0; c < 3; c++) _offset[c] = o ? [o[c] doubleValue] : 0.0;
     _lRef = [j[@"L_base"] doubleValue];
+    // 标定文件里记着解它时用的零点。有的话就存进锁定值，方便同批套用。
+    NSArray *zp = j[@"zeropoint_used"];
+    if (zp.count == 3) {
+        for (int c = 0; c < 3; c++) _lockedT0[c] = [zp[c] doubleValue];
+        _hasLockedT0 = YES;
+        _chkLock.state = NSControlStateValueOn;
+    }
     _slGammaR.slider.doubleValue = _gamma[0];
     _slGammaB.slider.doubleValue = _gamma[2];
     _slGammaR.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[0]];
@@ -1067,9 +1109,10 @@ static const double DISP_PCT = 99.9;
 
 - (void)readoutsWithT0:(const double *)t0 {
     if (!_proxy.rgb) return;
+    NSString *src = _hasLockedT0 ? @"锁定值"
+                  : (_haveBase ? @"手动点选" : @"画面最亮 0.05%");
     _lblT0.stringValue = [NSString stringWithFormat:@"T0 = %.5f  %.5f  %.5f　%@",
-                          t0[0], t0[1], t0[2],
-                          _haveBase ? @"手动点选" : @"画面最亮 0.05%"];
+                          t0[0], t0[1], t0[2], src];
 
     // 输入体检：抽样统计唯一取值数 + 撞密度上限的像素比例
     size_t n = _proxy.w * _proxy.h;
@@ -1261,9 +1304,12 @@ static const double DISP_PCT = 99.9;
         @"饱和度、高光恢复 —— 那些都是按通道施加的，会把密度斜率拧弯。",
         12.5, C_INK(), NO, 16);
 
-    add(@"第 2 步　定零点（每帧都要做）", 15, C_INK(), YES, 5);
-    add(@"零点就是这一帧「密度为零」的那个透过率，负片上指未曝光的片基。\n"
-        @"· 最准：按「在图上点片基」，然后点负片最亮、最干净的那条边（通常挨着齿孔）。\n"
+    add(@"第 2 步　定零点", 15, C_INK(), YES, 5);
+    add(@"零点 = 这一帧「密度为零」的那个透过率，负片上指未曝光的片基。\n"
+        @"· 画面里有片基（没裁画幅）：按「在图上点片基」，点最亮、最干净的那条边。\n"
+        @"· 没有片基（Noritsu、哈苏 X5 等掩膜机型常见）：在胶卷开头盖着镜头盖空拍一格，"
+        @"那一格就是纯片基。让店家关掉全部自动项后扫出来，打开它点片基，"
+        @"再勾上「锁住，供同一批的其余帧共用」。\n"
         @"· 最省事：「自动」，取画面最亮的那 0.05%。黑白边多的画面够准，有强光就会偏。\n"
         @"零点错了，后面用什么算法都救不回来。宁可多点一次。",
         12.5, C_INK(), NO, 16);
