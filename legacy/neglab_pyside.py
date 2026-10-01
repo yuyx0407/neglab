@@ -879,9 +879,14 @@ class Win(QMainWindow):
              f"  L_ref      {lr:.4f}",
              ""]
         if self.cal_t0 is not None and self.pts:
-            arr = np.array([p["lin"] for p in self.pts], np.float32)
-            Lp = np.squeeze(np.maximum(invert(arr[None, :, :], t0, g, o, lr), 1e-7))
-            dev = np.abs(np.log2(Lp) - np.log2(Lp)[:, 1:2]).max(axis=1)
+            # ★ 中性残差的定义与 app/NegMath.m 的 negNeutralResidual() 一致：
+            #   ΔL × 0.6 / log10(2)，ΔL 是三通道曝光坐标的最大散差。
+            # 早期这里写的是「反相之后取 log2 的散差」——量纲也是档，但数值大 2.78 倍，
+            # 而且某个通道被压到 0 时会给出假的天文数字。已统一。
+            arr = np.array([p["lin"] for p in self.pts], np.float64)
+            T = np.maximum(np.minimum(arr / np.maximum(np.asarray(t0, np.float64), 1e-9), 1.0), 1e-7)
+            Lc = (-np.log10(T) - np.asarray(o, np.float64)) / np.asarray(g, np.float64)
+            dev = np.abs(Lc - Lc[:, 1:2]).max(axis=1) * 0.6 / np.log10(2.0)
             mx = float(dev.max())
             s += ["── ★ 验收：你点的那些灰还剩多少偏色 ──",
                   "  " + "  ".join(f"{v:.4f}" for v in dev) + "  档",

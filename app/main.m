@@ -1,0 +1,1175 @@
+// main.m —— NegLab 的界面。AppKit 原生，不含 Python、不含 Qt。
+//
+// 刻意的取舍：没有侧边栏、没有标签页、没有主题设置。整条流程就是四步 ——
+// 打开 → 定零点 → 解 γ → 导出 —— 所以界面就是四步。参数分成「每帧都要定的」
+// 和「一次性定的」两组分开摆，因为这是这套数学里最容易搞混的地方。
+//
+// 编译见 build_app.sh。
+#import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include "NegImage.h"
+#include "NegMath.h"
+#include <math.h>
+#include <string.h>
+
+// ═══════════════════════════════════════════════ 外观常量
+
+// 命令行给的路径。在 main 里存下来，等界面搭好再读 ——
+// 发通知会有时序依赖（观察者可能还没注册），这里不留这个不确定性。
+static NSString *gLaunchPath = nil;      // argv[1]：要打开的负片
+static NSString *gLaunchCalib = nil;     // argv[2]：可选，跟着一起载入的标定 json
+
+static const CGFloat PANEL_W = 340;
+static const CGFloat PROXY_MAX_DIM = 1500;
+
+static NSColor *C_BG(void)   { return [NSColor colorWithSRGBRed:0.965 green:0.965 blue:0.972 alpha:1]; }
+static NSColor *C_CARD(void) { return [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:1]; }
+static NSColor *C_LINE(void) { return [NSColor colorWithSRGBRed:0.886 green:0.886 blue:0.902 alpha:1]; }
+static NSColor *C_INK(void)  { return [NSColor colorWithSRGBRed:0.113 green:0.113 blue:0.122 alpha:1]; }
+static NSColor *C_MUT(void)  { return [NSColor colorWithSRGBRed:0.525 green:0.525 blue:0.545 alpha:1]; }
+static NSColor *C_ACC(void)  { return [NSColor colorWithSRGBRed:0.000 green:0.443 blue:0.890 alpha:1]; }
+static NSColor *C_OK(void)   { return [NSColor colorWithSRGBRed:0.114 green:0.541 blue:0.306 alpha:1]; }
+static NSColor *C_WARN(void) { return [NSColor colorWithSRGBRed:0.753 green:0.224 blue:0.169 alpha:1]; }
+
+// ═══════════════════════════════════════════════ 小工具
+
+static NSTextField *mkLabel(NSString *s, CGFloat size, NSColor *color, BOOL bold) {
+    NSTextField *t = [NSTextField labelWithString:s];
+    t.font = bold ? [NSFont systemFontOfSize:size weight:NSFontWeightSemibold]
+                  : [NSFont systemFontOfSize:size];
+    t.textColor = color;
+    t.lineBreakMode = NSLineBreakByWordWrapping;
+    t.usesSingleLineMode = NO;
+    t.selectable = NO;
+    [t setContentHuggingPriority:NSLayoutPriorityDefaultLow - 1
+                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [t setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 1
+                                forOrientation:NSLayoutConstraintOrientationHorizontal];
+    return t;
+}
+
+static NSTextField *mkMono(NSString *s, CGFloat size, NSColor *color) {
+    NSTextField *t = [NSTextField labelWithString:s];
+    t.font = [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightRegular];
+    t.textColor = color;
+    t.selectable = YES;
+    t.usesSingleLineMode = NO;
+    return t;
+}
+
+static NSButton *mkButton(NSString *title, id target, SEL action) {
+    NSButton *b = [NSButton buttonWithTitle:title target:target action:action];
+    b.bezelStyle = NSBezelStyleRounded;
+    return b;
+}
+
+// 垂直栈：alignment 用 Width，让每一行都撑满宽度（AppKit 里这是「拉伸」的意思）
+static NSStackView *vstack(NSArray<NSView *> *views, CGFloat spacing) {
+    NSStackView *s = [NSStackView stackViewWithViews:views];
+    s.orientation = NSUserInterfaceLayoutOrientationVertical;
+    s.alignment = NSLayoutAttributeWidth;
+    s.spacing = spacing;
+    s.translatesAutoresizingMaskIntoConstraints = NO;
+    return s;
+}
+
+static NSStackView *hstack(NSArray<NSView *> *views, CGFloat spacing) {
+    NSStackView *s = [NSStackView stackViewWithViews:views];
+    s.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    s.alignment = NSLayoutAttributeCenterY;
+    s.spacing = spacing;
+    s.translatesAutoresizingMaskIntoConstraints = NO;
+    return s;
+}
+
+// 卡片：白底 + 1px 边 + 10pt 圆角。用普通 NSView 自己画，避免 NSBox 的内容视图规则。
+// qsort 的比较函数必须是函数指针（C 的 qsort 收不了 block）
+static int cmpFloatAsc(const void *a, const void *b) {
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x < y) ? -1 : (x > y ? 1 : 0);
+}
+
+static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
+    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+    box.wantsLayer = YES;
+    box.layer.backgroundColor = C_CARD().CGColor;
+    box.layer.borderColor = C_LINE().CGColor;
+    box.layer.borderWidth = 1;
+    box.layer.cornerRadius = 10;
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSMutableArray<NSView *> *all = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *gap = [NSMutableArray array];
+    if (title.length) { [all addObject:mkLabel(title, 11.5, C_MUT(), YES)]; [gap addObject:@7]; }
+    for (NSView *r in rows) { [all addObject:r]; [gap addObject:@8]; }
+
+    NSStackView *st = vstack(all, 8);
+    for (NSUInteger i = 0; i + 1 < st.arrangedSubviews.count; i++)
+        [st setCustomSpacing:gap[i].doubleValue afterView:st.arrangedSubviews[i]];
+
+    [box addSubview:st];
+    [NSLayoutConstraint activateConstraints:@[
+        [st.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:12],
+        [st.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-12],
+        [st.topAnchor constraintEqualToAnchor:box.topAnchor constant:11],
+        [st.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-12],
+    ]];
+    return box;
+}
+
+// 一行「标签 ——— 滑杆 ——— 数值」
+@interface NegSliderRow : NSStackView
+@property (nonatomic, strong) NSSlider *slider;
+@property (nonatomic, strong) NSTextField *value;
+- (instancetype)initWithTitle:(NSString *)title lo:(double)lo hi:(double)hi
+                          val:(double)val fmt:(NSString *)fmt;
+@end
+
+@implementation NegSliderRow
+- (instancetype)initWithTitle:(NSString *)title lo:(double)lo hi:(double)hi
+                          val:(double)val fmt:(NSString *)fmt {
+    self = [super init];
+    self.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.alignment = NSLayoutAttributeCenterY;
+    self.spacing = 8;
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *t = mkLabel(title, 12, C_INK(), NO);
+    t.translatesAutoresizingMaskIntoConstraints = NO;
+    [t.widthAnchor constraintEqualToConstant:40].active = YES;
+    [t setContentHuggingPriority:NSLayoutPriorityRequired
+                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    _slider = [NSSlider sliderWithValue:val minValue:lo maxValue:hi target:nil action:nil];
+    _slider.continuous = YES;
+    _slider.translatesAutoresizingMaskIntoConstraints = NO;
+    [_slider setContentHuggingPriority:NSLayoutPriorityDefaultLow - 2
+                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_slider setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 2
+                                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    _value = mkMono([NSString stringWithFormat:fmt, val], 11.5, C_MUT());
+    _value.alignment = NSTextAlignmentRight;
+    _value.translatesAutoresizingMaskIntoConstraints = NO;
+    [_value.widthAnchor constraintEqualToConstant:56].active = YES;
+    [_value setContentHuggingPriority:NSLayoutPriorityRequired
+                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [self addArrangedSubview:t];
+    [self addArrangedSubview:_slider];
+    [self addArrangedSubview:_value];
+    return self;
+}
+@end
+
+// ═══════════════════════════════════════════════ 预览画布
+
+@interface NegCanvas : NSView
+@property (nonatomic, strong) NSImage *shown;
+@property (nonatomic, copy) void (^onSample)(double nx, double ny);
+@property (nonatomic) BOOL picking;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *marks;
+@end
+
+@implementation NegCanvas {
+    NSRect _imgRect;
+}
+
+- (instancetype)initWithFrame:(NSRect)f {
+    self = [super initWithFrame:f];
+    if (self) {
+        _marks = [NSMutableArray array];
+        self.wantsLayer = YES;
+        self.layer.backgroundColor = [NSColor colorWithSRGBRed:0.20 green:0.20 blue:0.21 alpha:1].CGColor;
+        self.layer.cornerRadius = 10;
+        [self registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
+    }
+    return self;
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)isFlipped { return YES; }
+
+- (void)setPicking:(BOOL)picking {
+    _picking = picking;
+    [self.window invalidateCursorRectsForView:self];
+}
+
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds
+                 cursor:(_picking ? NSCursor.crosshairCursor : NSCursor.arrowCursor)];
+}
+
+- (void)setShown:(NSImage *)shown {
+    _shown = shown;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)layoutImageRect {
+    if (!_shown || _shown.size.width < 1 || _shown.size.height < 1) {
+        _imgRect = NSZeroRect;
+        return;
+    }
+    NSSize s = _shown.size;
+    CGFloat k = MIN((NSWidth(self.bounds) - 24) / s.width,
+                    (NSHeight(self.bounds) - 24) / s.height);
+    CGFloat w = s.width * k, h = s.height * k;
+    _imgRect = NSMakeRect(floor((NSWidth(self.bounds) - w) / 2),
+                          floor((NSHeight(self.bounds) - h) / 2), w, h);
+}
+
+- (void)drawRect:(NSRect)dirty {
+    [self layoutImageRect];
+    if (!_shown) { [self drawPlaceholder]; return; }
+    [_shown drawInRect:_imgRect fromRect:NSZeroRect
+             operation:NSCompositingOperationSourceOver fraction:1.0
+       respectFlipped:YES
+                hints:@{ NSImageHintInterpolation: @(NSImageInterpolationHigh) }];
+
+    for (NSDictionary *m in _marks) {
+        CGFloat x = _imgRect.origin.x + [m[@"nx"] doubleValue] * _imgRect.size.width;
+        CGFloat y = _imgRect.origin.y + [m[@"ny"] doubleValue] * _imgRect.size.height;
+        BOOL base = [m[@"kind"] isEqualToString:@"base"];
+        NSColor *c = base ? [NSColor colorWithSRGBRed:1.0 green:0.624 blue:0.04 alpha:1] : C_OK();
+        NSBezierPath *p = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(x - 8, y - 8, 16, 16)];
+        p.lineWidth = 2;
+        [c setStroke];
+        [p stroke];
+        NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(x - 1, y - 1, 2, 2)];
+        [dot stroke];
+    }
+}
+
+- (void)drawPlaceholder {
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = NSTextAlignmentCenter;
+    NSDictionary *a = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:17 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: [NSColor colorWithWhite:0.66 alpha:1],
+        NSParagraphStyleAttributeName: ps };
+    NSDictionary *b = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:12.5],
+        NSForegroundColorAttributeName: [NSColor colorWithWhite:0.48 alpha:1],
+        NSParagraphStyleAttributeName: ps };
+    CGFloat cy = NSHeight(self.bounds) / 2;
+    [@"把负片拖进来"
+        drawInRect:NSMakeRect(0, cy - 26, NSWidth(self.bounds), 24) withAttributes:a];
+    [@"或按 ⌘O 打开。扫描件和相机 raw 都可以。"
+        drawInRect:NSMakeRect(0, cy + 2, NSWidth(self.bounds), 20) withAttributes:b];
+}
+
+- (void)mouseDown:(NSEvent *)e {
+    if (!_shown || !self.onSample) return;
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    if (!NSPointInRect(p, _imgRect)) return;
+    double nx = (p.x - _imgRect.origin.x) / _imgRect.size.width;
+    double ny = (p.y - _imgRect.origin.y) / _imgRect.size.height;
+    self.onSample(MIN(MAX(nx, 0), 1), MIN(MAX(ny, 0), 1));
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)s { return NSDragOperationCopy; }
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)s {
+    NSArray<NSURL *> *urls =
+        [s.draggingPasteboard readObjectsForClasses:@[ NSURL.class ]
+                                           options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
+    if (!urls.count) return NO;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"NegLabOpenURL" object:urls.firstObject];
+    return YES;
+}
+@end
+
+// ═══════════════════════════════════════════════ 主控制器
+
+@interface NegApp : NSObject <NSApplicationDelegate>
+@end
+
+@implementation NegApp {
+    NSWindow *_win;
+    NegCanvas *_canvas;
+    NSTextField *_lblFile, *_lblStatus, *_lblSteps;
+    NSSegmentedControl *_segView, *_segZero;
+    NSTextField *_lblT0, *_lblFit, *_lblHealth;
+    NSButton *_btnGrey, *_btnUndo, *_btnClearCal;
+    NegSliderRow *_slGammaR, *_slGammaB, *_slExposure, *_slBlack;
+    NSWindow *_guide;
+
+    NegFrame     _full, _proxy;
+    NSImage *_imgOriginal, *_imgResult;
+    double _t0[3];          // 手动点选的零点
+    double _autoT0[3];      // 自动零点，载入时算一次
+    double _gamma[3];
+    double _offset[3];
+    double _lRef;
+    NSMutableArray<NSDictionary *> *_greys;
+    NSURL *_pendingCalib;        // 命令行第二参数给的标定，等这张负片读完了再套
+    BOOL _haveBase;
+    int _mode;                   // 0 无 / 1 点片基 / 2 点中性灰
+    NSString *_currentPath;
+    BOOL _loading;
+}
+
+// ── 启动 ───────────────────────────────────────────────────────────────────
+- (void)applicationDidFinishLaunching:(NSNotification *)n {
+    _gamma[0] = 1.0; _gamma[1] = 1.0; _gamma[2] = 1.0;
+    _greys = [NSMutableArray array];
+    [self buildMenu];
+    [self buildWindow];
+    [NSApp activateIgnoringOtherApps:YES];
+    if (gLaunchPath) {
+        if (gLaunchCalib) _pendingCalib = [NSURL fileURLWithPath:gLaunchCalib];
+        [self loadPath:gLaunchPath];
+    } else if (![[NSUserDefaults standardUserDefaults] boolForKey:@"NegLabSeenGuide"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"NegLabSeenGuide"];
+        [self showGuide:nil];
+    }
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)a { return YES; }
+
+- (void)application:(NSApplication *)app openFiles:(NSArray<NSString *> *)files {
+    if (files.count) [self loadPath:files.firstObject];
+}
+
+- (void)buildMenu {
+    NSMenu *bar = [NSMenu new];
+
+    NSMenuItem *appItem = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *appMenu = [NSMenu new];
+    [appMenu addItemWithTitle:@"关于 NegLab" action:@selector(showAbout:) keyEquivalent:@""].target = self;
+    [appMenu addItem:NSMenuItem.separatorItem];
+    [appMenu addItemWithTitle:@"隐藏 NegLab" action:@selector(hide:) keyEquivalent:@"h"];
+    [appMenu addItemWithTitle:@"退出 NegLab" action:@selector(terminate:) keyEquivalent:@"q"];
+    appItem.submenu = appMenu;
+
+    NSMenuItem *fileItem = [bar addItemWithTitle:@"文件" action:nil keyEquivalent:@""];
+    NSMenu *fileMenu = [NSMenu new];
+    [fileMenu addItemWithTitle:@"打开负片…" action:@selector(openDoc:) keyEquivalent:@"o"].target = self;
+    [fileMenu addItemWithTitle:@"导出…" action:@selector(exportDoc:) keyEquivalent:@"s"].target = self;
+    [fileMenu addItem:NSMenuItem.separatorItem];
+    fileItem.submenu = fileMenu;
+
+    NSMenuItem *viewItem = [bar addItemWithTitle:@"视图" action:nil keyEquivalent:@""];
+    NSMenu *viewMenu = [NSMenu new];
+    [viewMenu addItemWithTitle:@"切换原始／结果" action:@selector(toggleView:) keyEquivalent:@"b"].target = self;
+    [viewMenu addItemWithTitle:@"清空所有取样点" action:@selector(clearAll:) keyEquivalent:@"k"].target = self;
+    viewItem.submenu = viewMenu;
+
+    NSMenuItem *helpItem = [bar addItemWithTitle:@"帮助" action:nil keyEquivalent:@""];
+    NSMenu *helpMenu = [NSMenu new];
+    [helpMenu addItemWithTitle:@"使用说明" action:@selector(showGuide:) keyEquivalent:@"?"].target = self;
+    helpItem.submenu = helpMenu;
+
+    NSApp.mainMenu = bar;
+}
+
+- (void)showAbout:(id)s {
+    NSAlert *a = [NSAlert new];
+    a.messageText = @"NegLab 1.0";
+    a.informativeText =
+        @"科学去色罩工作台。\n\n"
+        @"先把参数定下来（零点、逐通道密度斜率、偏移），再谈反相的方法。\n"
+        @"数学只有三行，见 app/NegMath.h 顶部。\n\n"
+        @"MIT 许可。负片里没有标准答案 —— 一切结论以你自己点的那几块中性灰为准。";
+    [a runModal];
+}
+
+// ── 搭侧栏 ─────────────────────────────────────────────────────────────────
+- (NSView *)buildSidebar {
+    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, PANEL_W, 100)];
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    v.wantsLayer = YES;
+    v.layer.backgroundColor = C_BG().CGColor;
+
+    _lblSteps = mkLabel(@"", 11.5, C_MUT(), YES);
+    _lblSteps.alignment = NSTextAlignmentCenter;
+
+    // 卡片①：零点
+    _segZero = [NSSegmentedControl segmentedControlWithLabels:@[ @"自动", @"手动点选" ]
+                                                 trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                       target:self action:@selector(zeroModeChanged:)];
+    _segZero.selectedSegment = 0;
+    _segZero.controlSize = NSControlSizeSmall;
+    _segZero.font = [NSFont systemFontOfSize:11.5];
+    _segZero.segmentDistribution = NSSegmentDistributionFillEqually;
+
+    NSButton *btnBase = mkButton(@"在图上点片基", self, @selector(armBase:));
+    btnBase.controlSize = NSControlSizeSmall;
+    btnBase.font = [NSFont systemFontOfSize:11.5];
+
+    _lblT0 = mkMono(@"T0 —", 10.5, C_MUT());
+    NSView *cardZero = mkCard(@"① 零点 T0　每帧都要重定",
+                              @[_segZero, btnBase, _lblT0,
+                                mkLabel(@"负片上「密度为零」的透过率，就是未曝光的片基。"
+                                        @"点它最准；自动取画面最亮 0.05%，画面里有强光会偏。",
+                                        10.5, C_MUT(), NO)]);
+
+    // 卡片②：斜率
+    _btnGrey = mkButton(@"点中性灰（0 块）", self, @selector(armGrey:));
+    _btnUndo = mkButton(@"撤销", self, @selector(undoGrey:));
+    NSButton *btnFit = mkButton(@"解算 γ", self, @selector(doFit:));
+    for (NSButton *b in @[_btnGrey, _btnUndo, btnFit]) {
+        b.controlSize = NSControlSizeSmall;
+        b.font = [NSFont systemFontOfSize:11.5];
+    }
+    NSStackView *rowGrey = hstack(@[_btnGrey, _btnUndo, btnFit], 6);
+
+    _slGammaR = [[NegSliderRow alloc] initWithTitle:@"γ 红" lo:0.3 hi:3.0 val:1.0 fmt:@"%.3f"];
+    _slGammaB = [[NegSliderRow alloc] initWithTitle:@"γ 蓝" lo:0.3 hi:3.0 val:1.0 fmt:@"%.3f"];
+    for (NegSliderRow *r in @[_slGammaR, _slGammaB]) {
+        r.slider.target = self;
+        r.slider.action = @selector(manualGammaChanged:);
+    }
+    _lblFit = mkLabel(@"尚未标定。没有 γ 也能看，只是三通道会差好几档。", 10.5, C_MUT(), NO);
+
+    NSButton *btnSaveCal = mkButton(@"存标定", self, @selector(saveCal:));
+    NSButton *btnLoadCal = mkButton(@"载入", self, @selector(loadCal:));
+    NSButton *btnHow = mkButton(@"怎么办", self, @selector(howToCalibrate:));
+    _btnClearCal = mkButton(@"清空", self, @selector(clearAll:));
+    for (NSButton *b in @[btnSaveCal, btnLoadCal, btnHow, _btnClearCal]) {
+        b.controlSize = NSControlSizeSmall;
+        b.font = [NSFont systemFontOfSize:11.5];
+    }
+    NSStackView *rowCal = hstack(@[btnSaveCal, btnLoadCal, btnHow, _btnClearCal], 6);
+
+    NSView *cardGamma = mkCard(@"② 斜率 γ 与偏移　一个「型号 × 链路」定一次",
+                               @[rowGrey, _slGammaR, _slGammaB, _lblFit, rowCal]);
+
+    // 卡片③：输出
+    _slExposure = [[NegSliderRow alloc] initWithTitle:@"曝光" lo:-2 hi:2 val:0 fmt:@"%+.2f"];
+    _slBlack    = [[NegSliderRow alloc] initWithTitle:@"黑点" lo:0 hi:0.05 val:0 fmt:@"%.4f"];
+    for (NegSliderRow *r in @[_slExposure, _slBlack]) {
+        r.slider.target = self;
+        r.slider.action = @selector(outputChanged:);
+    }
+    _lblHealth = mkLabel(@"", 10.5, C_MUT(), NO);
+    NSView *cardOut = mkCard(@"③ 输出　只改明暗，不改中性", @[_slExposure, _slBlack, _lblHealth]);
+
+    // 底部
+    NSButton *btnOpen = mkButton(@"打开…", self, @selector(openDoc:));
+    NSButton *btnExport = mkButton(@"导出…", self, @selector(exportDoc:));
+    NSButton *btnGuide = mkButton(@"说明", self, @selector(showGuide:));
+    NSStackView *rowBottom = hstack(@[btnOpen, btnExport, btnGuide], 8);
+    [rowBottom setDistribution:NSStackViewDistributionFillEqually];
+
+    _lblStatus = mkLabel(@"把负片拖进来，或按 ⌘O。", 10.5, C_MUT(), NO);
+
+    NSStackView *stack = vstack(@[_lblSteps, cardZero, cardGamma, cardOut, rowBottom, _lblStatus], 12);
+    stack.edgeInsets = NSEdgeInsetsMake(14, 13, 14, 13);
+    [v addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
+        [stack.topAnchor constraintEqualToAnchor:v.topAnchor],
+    ]];
+    return v;
+}
+
+// ── 搭主窗 ─────────────────────────────────────────────────────────────────
+- (void)buildWindow {
+    _win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1200, 800)
+                                       styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                                  NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+                                         backing:NSBackingStoreBuffered defer:NO];
+    _win.title = @"NegLab";
+    _win.minSize = NSMakeSize(940, 640);
+    _win.backgroundColor = C_BG();
+    [_win center];
+    [_win setFrameAutosaveName:@"NegLabMainWindow"];
+
+    NSView *root = _win.contentView;
+
+    _lblFile = mkLabel(@"未打开文件", 12.5, C_INK(), YES);
+    _lblFile.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _lblFile.usesSingleLineMode = YES;
+
+    _segView = [NSSegmentedControl segmentedControlWithLabels:@[ @"原始负片", @"结果" ]
+                                                 trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                       target:self action:@selector(viewChanged:)];
+    _segView.selectedSegment = 1;
+    _segView.controlSize = NSControlSizeSmall;
+    _segView.font = [NSFont systemFontOfSize:11.5];
+
+    NSView *topBar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
+    topBar.translatesAutoresizingMaskIntoConstraints = NO;
+    _lblFile.translatesAutoresizingMaskIntoConstraints = NO;
+    _segView.translatesAutoresizingMaskIntoConstraints = NO;
+    [topBar addSubview:_lblFile];
+    [topBar addSubview:_segView];
+    [NSLayoutConstraint activateConstraints:@[
+        [_lblFile.leadingAnchor constraintEqualToAnchor:topBar.leadingAnchor constant:16],
+        [_lblFile.centerYAnchor constraintEqualToAnchor:topBar.centerYAnchor],
+        [_lblFile.trailingAnchor constraintLessThanOrEqualToAnchor:_segView.leadingAnchor constant:-12],
+        [_segView.trailingAnchor constraintEqualToAnchor:topBar.trailingAnchor constant:-16],
+        [_segView.centerYAnchor constraintEqualToAnchor:topBar.centerYAnchor],
+    ]];
+
+    _canvas = [[NegCanvas alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
+    _canvas.translatesAutoresizingMaskIntoConstraints = NO;
+    __weak NegApp *ws = self;
+    _canvas.onSample = ^(double nx, double ny) { [ws handleClickX:nx y:ny]; };
+
+    NSView *left = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
+    left.translatesAutoresizingMaskIntoConstraints = NO;
+    [left addSubview:topBar];
+    [left addSubview:_canvas];
+
+    NSView *side = [self buildSidebar];
+
+    [root addSubview:left];
+    [root addSubview:side];
+    [NSLayoutConstraint activateConstraints:@[
+        [left.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [left.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [left.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [left.trailingAnchor constraintEqualToAnchor:side.leadingAnchor],
+
+        [side.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [side.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [side.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [side.widthAnchor constraintEqualToConstant:PANEL_W],
+
+        [topBar.leadingAnchor constraintEqualToAnchor:left.leadingAnchor],
+        [topBar.trailingAnchor constraintEqualToAnchor:left.trailingAnchor],
+        [topBar.topAnchor constraintEqualToAnchor:left.topAnchor],
+        [topBar.heightAnchor constraintEqualToConstant:40],
+
+        [_canvas.leadingAnchor constraintEqualToAnchor:left.leadingAnchor constant:14],
+        [_canvas.trailingAnchor constraintEqualToAnchor:left.trailingAnchor constant:-14],
+        [_canvas.topAnchor constraintEqualToAnchor:topBar.bottomAnchor constant:2],
+        [_canvas.bottomAnchor constraintEqualToAnchor:left.bottomAnchor constant:-14],
+    ]];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(openURLNote:)
+                                                 name:@"NegLabOpenURL" object:nil];
+
+    [_win makeKeyAndOrderFront:nil];
+    [self refreshEnabled];
+}
+
+- (void)openURLNote:(NSNotification *)n {
+    NSURL *u = n.object;
+    if ([u isKindOfClass:NSURL.class] && u.isFileURL) [self loadPath:u.path];
+}
+
+// ── 载入 ───────────────────────────────────────────────────────────────────
+- (void)openDoc:(id)s {
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.allowsMultipleSelection = NO;
+    p.canChooseDirectories = NO;
+    p.message = @"选一张负片：店家扫的 TIFF，或你自己翻拍的相机 raw。";
+    if ([p runModal] != NSModalResponseOK) return;
+    [self loadPath:p.URL.path];
+}
+
+- (void)loadPath:(NSString *)path {
+    if (!path.length || _loading) return;
+    _loading = YES;
+    _lblFile.stringValue = [NSString stringWithFormat:@"正在读 %@ …", path.lastPathComponent];
+    [self setStatus:@"正在解码。45 MB 的 TIFF 大约要一两秒。"];
+    [_win setTitle:[NSString stringWithFormat:@"NegLab — %@", path.lastPathComponent]];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // 块里不能引用 C 数组，所以在这一层就把它们变成 NSString
+        NegFrame f; char enc[128] = {0}, err[256] = {0};
+        int ok = negLoadFrame(path.UTF8String, &f, enc, sizeof(enc), err, sizeof(err));
+        NegFrame px = {NULL, 0, 0};
+        // C 数组进不了 block，用堆上的指针；生命周期交给下面那个主线程 block
+        double *autoT0 = calloc(3, sizeof(double));
+        if (!autoT0) autoT0 = NULL;
+        if (autoT0) { autoT0[0] = autoT0[1] = autoT0[2] = 1.0; }
+        if (ok == 0) {
+            px = negDownsample(&f, PROXY_MAX_DIM);
+            if (px.rgb && autoT0) negEstimateZero(px.rgb, px.w, px.h, 0.0005, autoT0);
+        }
+        NSString *encStr = @(enc), *errStr = @(err);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_loading = NO;
+            if (ok != 0) {
+                NSAlert *a = [NSAlert new];
+                a.messageText = @"打不开这张负片";
+                a.informativeText = [NSString stringWithFormat:
+                    @"%@\n\n能读的：TIFF / PNG / JPEG，以及系统认得出来的相机 raw"
+                    @"（ARW、CR3、NEF、RAF、DNG…）。\n"
+                    @"若店家给的是别家的专有格式，请让他们重导一份 16-bit TIFF。", errStr];
+                [a runModal];
+                self->_lblFile.stringValue = @"未打开文件";
+                [self setStatus:@"打开失败。"];
+                free(autoT0);
+                return;
+            }
+            negFreeFrame(&self->_full);
+            negFreeFrame(&self->_proxy);
+            self->_full = f;
+            self->_proxy = px;
+            for (int c = 0; c < 3; c++) self->_autoT0[c] = autoT0 ? autoT0[c] : 1.0;
+            free(autoT0);
+            [self->_greys removeAllObjects];
+            [self->_canvas.marks removeAllObjects];
+            self->_haveBase = NO;
+            self->_mode = 0;
+            self->_canvas.picking = NO;
+            self->_currentPath = path;
+            self->_segZero.selectedSegment = 0;
+            self->_lblFile.stringValue = [NSString stringWithFormat:@"%@　%zu×%zu　%@",
+                                          path.lastPathComponent, f.w, f.h, encStr];
+            [self setStatus:@"① 先把零点定下来。画面里有未曝光的片基就点它，最准。"];
+            [self renderViews];
+            if (self->_pendingCalib) {
+                NSURL *u = self->_pendingCalib;
+                self->_pendingCalib = nil;
+                [self loadCalFromPath:u];
+            }
+        });
+    });
+}
+
+// ── 取样 ───────────────────────────────────────────────────────────────────
+// 与界面无关的一步：先在「全分辨率」上取样，再谈反相。
+// 画面缩放不参与 —— 否则同一块灰在窗口大小不同时给出不同答案。
+// 具体的抽样规则在 negSamplePatch() 里（tools/calib_cli 走的是同一个函数）。
+- (void)sampleAt:(double)nx y:(double)ny out:(double *)out {
+    negSamplePatch(&_full, nx, ny, 7, out);
+}
+
+- (void)handleClickX:(double)nx y:(double)ny {
+    if (_full.rgb == NULL) return;
+    if (_mode == 0) {
+        [self setStatus:@"要取样，先按「在图上点片基」或「点中性灰」进入取点模式。"];
+        return;
+    }
+    double s[3];
+    [self sampleAt:nx y:ny out:s];
+    NSString *kind = @"grey";
+    if (_mode == 1) {
+        for (int c = 0; c < 3; c++) _t0[c] = MAX(s[c], 1e-6);
+        _haveBase = YES;
+        _segZero.selectedSegment = 1;
+        [self setStatus:@"零点已设为手动点选。接着去点中性灰解 γ。"];
+        kind = @"base";
+    } else {
+        [_greys addObject:@{ @"nx": @(nx), @"ny": @(ny),
+                             @"lin": @[ @(s[0]), @(s[1]), @(s[2]) ] }];
+        [self setStatus:[NSString stringWithFormat:@"已点 %lu 块中性灰。%@",
+                         (unsigned long)_greys.count,
+                         _greys.count >= 2 ? @"可以按「解算 γ」了。" : @"至少两块，亮度要拉开。"]];
+    }
+    [_canvas.marks addObject:@{ @"nx": @(nx), @"ny": @(ny), @"kind": kind }];
+    [_canvas setNeedsDisplay:YES];
+    [self renderViews];
+}
+
+// ── 参数变化 ───────────────────────────────────────────────────────────────
+- (void)armBase:(id)s {
+    _mode = (_mode == 1) ? 0 : 1;
+    _canvas.picking = (_mode != 0);
+    [self setStatus:_mode == 1
+        ? @"在图上点「未曝光的片基」—— 负片上最亮、最干净的那条边。"
+        : @""];
+}
+
+- (void)armGrey:(id)s {
+    _mode = (_mode == 2) ? 0 : 2;
+    _canvas.picking = (_mode != 0);
+    [self setStatus:_mode == 2
+        ? @"点你确定是中性的灰块。多点几块、亮度拉开，都点在色块正中央。"
+        : @""];
+}
+
+- (void)undoGrey:(id)s {
+    if (!_greys.count) return;
+    [_greys removeLastObject];
+    for (NSInteger i = (NSInteger)_canvas.marks.count - 1; i >= 0; i--)
+        if ([_canvas.marks[(NSUInteger)i][@"kind"] isEqualToString:@"grey"]) {
+            [_canvas.marks removeObjectAtIndex:(NSUInteger)i];
+            break;
+        }
+    [self renderViews];
+}
+
+- (void)zeroModeChanged:(id)s {
+    if (_segZero.selectedSegment == 0) {
+        _haveBase = NO;
+        for (NSInteger i = (NSInteger)_canvas.marks.count - 1; i >= 0; i--)
+            if ([_canvas.marks[(NSUInteger)i][@"kind"] isEqualToString:@"base"]) {
+                [_canvas.marks removeObjectAtIndex:(NSUInteger)i];
+                break;
+            }
+        [self setStatus:@"零点改用自动：取画面最亮的那 0.05%。黑白边干净的画面最准。"];
+    } else if (!_haveBase) {
+        _segZero.selectedSegment = 0;
+        [self setStatus:@"「手动点选」要先在图上点一下片基。"];
+        return;
+    }
+    [_canvas setNeedsDisplay:YES];
+    [self renderViews];
+}
+
+- (void)manualGammaChanged:(id)s {
+    _gamma[0] = MAX(_slGammaR.slider.doubleValue, 0.05);
+    _gamma[2] = MAX(_slGammaB.slider.doubleValue, 0.05);
+    _slGammaR.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[0]];
+    _slGammaB.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[2]];
+    [self renderViews];
+}
+
+- (void)outputChanged:(id)s { [self renderViews]; }
+
+- (void)viewChanged:(id)s {
+    _canvas.shown = (_segView.selectedSegment == 0) ? _imgOriginal : _imgResult;
+}
+
+- (void)toggleView:(id)s {
+    _segView.selectedSegment = (_segView.selectedSegment == 0) ? 1 : 0;
+    [self viewChanged:nil];
+}
+
+// ── 解 γ ───────────────────────────────────────────────────────────────────
+// 自动零点在载入时就算好并缓存。它是「最亮 0.05% 的均值」，要过一遍 3×3 中值 +
+// 两趟统计，拖动滑杆时每帧重算没必要，也会卡。
+- (void)curT0:(double *)t0 {
+    if (_haveBase) {
+        for (int c = 0; c < 3; c++) t0[c] = _t0[c];
+        return;
+    }
+    for (int c = 0; c < 3; c++) t0[c] = _autoT0[c];
+}
+
+- (void)doFit:(id)sender {
+    if (_greys.count < 2) {
+        NSAlert *a = [NSAlert new];
+        a.messageText = @"还差一点";
+        a.informativeText = @"至少要点两块中性灰，而且亮度要拉开。\n\n"
+                            @"只点一块的话，「斜率」和「偏移」分不开 —— "
+                            @"RawTherapee 的 Film Negative 也要求点两块，是同一个道理。";
+        [a runModal];
+        return;
+    }
+    double t0[3];
+    [self curT0:t0];
+    int n = (int)_greys.count;
+    float *samples = malloc(sizeof(float) * (size_t)n * 3);
+    if (!samples) return;
+    for (int i = 0; i < n; i++) {
+        NSArray *arr = _greys[(NSUInteger)i][@"lin"];
+        for (int c = 0; c < 3; c++) samples[i * 3 + c] = [arr[c] floatValue];
+    }
+    NegCal cal;
+    if (negFitGamma(samples, n, t0, &cal) == 0) {
+        for (int c = 0; c < 3; c++) _gamma[c] = cal.gamma[c];
+        _gamma[1] = 1.0;
+        for (int c = 0; c < 3; c++) _offset[c] = cal.offset[c];
+        _lRef = cal.lRef;
+        _slGammaR.slider.doubleValue = _gamma[0];
+        _slGammaB.slider.doubleValue = _gamma[2];
+        _slGammaR.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[0]];
+        _slGammaB.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[2]];
+
+        double residual = negNeutralResidual(samples, n, t0, _gamma, _offset);
+        BOOL good = cal.sigmaRatio < 0.06 && residual < 0.15;
+        _lblFit.stringValue = [NSString stringWithFormat:
+            @"γ = %.4f : 1 : %.4f　σ₂/σ₁ = %.2f%%　残差 %.3f 档\n%@",
+            _gamma[0], _gamma[2], cal.sigmaRatio * 100, residual,
+            good ? @"这批点足够中性。把标定存下来，同型号同链路长期复用。"
+                 : @"偏大：这些点不够中性。换个位置重点，或先回头检查零点。"];
+        _lblFit.textColor = good ? C_OK() : C_WARN();
+        [self setStatus:@"γ 已解出。零点仍然每帧重定，γ 不用。"];
+    } else {
+        [self setStatus:@"解算失败：这批点退化（可能亮度全挤在一起）。"];
+    }
+    free(samples);
+    [self renderViews];
+}
+
+// ── 标定的存取与说明 ───────────────────────────────────────────────────────
+- (void)howToCalibrate:(id)s {
+    NSAlert *a = [NSAlert new];
+    a.messageText = @"怎么标定 γ";
+    a.informativeText =
+        @"1. 打开「拍过色卡」的那一格负片。\n"
+        @"2. 先定零点（点片基，或用自动）。\n"
+        @"3. 按「点中性灰」，在卡上那条中性灰阶上依次点 2～6 块，亮度要拉开。\n"
+        @"4. 按「解算 γ」。σ₂/σ₁ 小于 6%、残差小于 0.15 档就算过。\n"
+        @"5. 按「存标定」。同型号、同店家的卷，下次直接「载入」就行。\n\n"
+        @"为什么只点灰、不点彩色块：灰只约束一件事 —— 三通道的密度斜率之比，干净且可验证。\n"
+        @"彩色块还牵涉「颜色像不像」，那是另一笔投入（透射靶 + 光谱数据 + DCP 配置）。\n"
+        @"本项目解决的是中性与线性，不是颜色。";
+    [a runModal];
+}
+
+- (void)saveCal:(id)s {
+    NSSavePanel *p = [NSSavePanel savePanel];
+    p.nameFieldStringValue = @"neglab-calibration.json";
+    p.allowedContentTypes = @[ [UTType typeWithFilenameExtension:@"json"] ];
+    if ([p runModal] != NSModalResponseOK) return;
+    double t0[3];
+    [self curT0:t0];
+    NSDictionary *d = @{
+        @"app": @"NegLab", @"version": @"1.0",
+        @"gamma": @[ @(_gamma[0]), @(1.0), @(_gamma[2]) ],
+        @"offset": @[ @(_offset[0]), @(_offset[1]), @(_offset[2]) ],
+        @"L_base": @(_lRef),
+        @"zeropoint_used": @[ @(t0[0]), @(t0[1]), @(t0[2]) ],
+        @"source": _currentPath.lastPathComponent ?: @"",
+        @"note": @"γ 管一个「胶片型号 × 扫描或翻拍链路」，不用每卷重解。"
+                 @"offset 只在与其同时解出的那个零点下才有效；换了零点请重点灰解一次。",
+    };
+    NSError *e = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:d
+                                                  options:NSJSONWritingPrettyPrinted error:&e];
+    if (!data || ![data writeToURL:p.URL atomically:YES])
+        [self setStatus:[NSString stringWithFormat:@"存不了：%@", e.localizedDescription]];
+    else
+        [self setStatus:[NSString stringWithFormat:@"已存 %@", p.URL.lastPathComponent]];
+}
+
+- (void)loadCal:(id)s {
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.allowedContentTypes = @[ [UTType typeWithFilenameExtension:@"json"] ];
+    if ([p runModal] != NSModalResponseOK) return;
+    [self loadCalFromPath:p.URL];
+}
+
+// 载入标定。命令行第二参数也走这里（方便批量：open -a NegLab.app --args 照片.tif 标定.json）
+- (void)loadCalFromPath:(NSURL *)url {
+    NSData *d = [NSData dataWithContentsOfURL:url];
+    NSDictionary *j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+    NSArray *g = j[@"gamma"];
+    if (!g) { [self setStatus:@"这个 json 里没有 gamma 字段。"]; return; }
+    NSArray *o = j[@"offset"];
+    _gamma[0] = [g[0] doubleValue];
+    _gamma[1] = 1.0;
+    _gamma[2] = [g[2] doubleValue];
+    for (int c = 0; c < 3; c++) _offset[c] = o ? [o[c] doubleValue] : 0.0;
+    _lRef = [j[@"L_base"] doubleValue];
+    _slGammaR.slider.doubleValue = _gamma[0];
+    _slGammaB.slider.doubleValue = _gamma[2];
+    _slGammaR.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[0]];
+    _slGammaB.value.stringValue = [NSString stringWithFormat:@"%.3f", _gamma[2]];
+    _lblFit.stringValue = [NSString stringWithFormat:
+        @"γ = %.4f : 1 : %.4f（来自 %@）\n换了零点就请重新点灰解一次。",
+        _gamma[0], _gamma[2], url.lastPathComponent];
+    _lblFit.textColor = C_MUT();
+    [self setStatus:@"标定已载入。"];
+    [self renderViews];
+}
+
+- (void)clearAll:(id)s {
+    [_greys removeAllObjects];
+    [_canvas.marks removeAllObjects];
+    _haveBase = NO;
+    _mode = 0;
+    _canvas.picking = NO;
+    _offset[0] = _offset[1] = _offset[2] = 0;
+    _lRef = 0;
+    _segZero.selectedSegment = 0;
+    _lblFit.stringValue = @"取样点已清空。γ 的滑杆值留着，可以手动调。";
+    _lblFit.textColor = C_MUT();
+    [self renderViews];
+}
+
+// ── 渲染 ───────────────────────────────────────────────────────────────────
+// 显示映射：把 99.9 百分位当白点。反相后的 0 就是片基（正片里应为黑），
+// 所以白点只能取画面自己最亮处；取 100% 会被单个高光点毁掉，99.9 是常用的折中。
+// 导出与预览用同一个百分位，免得「所见非所得」。
+static const double DISP_PCT = 99.9;
+
+- (void)renderViews {
+    if (!_proxy.rgb) { [self refreshEnabled]; return; }
+    size_t n = _proxy.w * _proxy.h;
+    float *o = malloc(sizeof(float) * n * 3);
+    if (!o) return;
+
+    memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
+    float hiO = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT);
+    _imgOriginal = [self imageFromRGBA:negRGBA8(o, _proxy.w, _proxy.h,
+                                                hiO > 1e-6f ? hiO : 1e-6f)];
+
+    double t0[3];
+    [self curT0:t0];
+    memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
+    negInvert(o, n, t0, _gamma, _offset, _lRef,
+              pow(2.0, _slExposure.slider.doubleValue),
+              _slBlack.slider.doubleValue, NEG_PI_CLIP_DEFAULT);
+    float hiR = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT);
+    _imgResult = [self imageFromRGBA:negRGBA8(o, _proxy.w, _proxy.h,
+                                              hiR > 1e-6f ? hiR : 1e-6f)];
+    free(o);
+
+    _canvas.shown = (_segView.selectedSegment == 0) ? _imgOriginal : _imgResult;
+    [self readoutsWithT0:t0];
+    [self refreshEnabled];
+}
+
+- (NSImage *)imageFromRGBA:(unsigned char *)rgba {
+    if (!rgba) return nil;
+    size_t w = _proxy.w, h = _proxy.h;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef ctx = CGBitmapContextCreate(rgba, w, h, 8, w * 4, cs,
+                                             (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+    CGImageRef cg = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
+    if (ctx) CGContextRelease(ctx);
+    CGColorSpaceRelease(cs);
+    free(rgba);
+    if (!cg) return nil;
+    NSImage *im = [[NSImage alloc] initWithCGImage:cg size:NSMakeSize((CGFloat)w, (CGFloat)h)];
+    CGImageRelease(cg);
+    return im;
+}
+
+- (void)readoutsWithT0:(const double *)t0 {
+    if (!_proxy.rgb) return;
+    _lblT0.stringValue = [NSString stringWithFormat:@"T0 = %.5f  %.5f  %.5f　%@",
+                          t0[0], t0[1], t0[2],
+                          _haveBase ? @"手动点选" : @"画面最亮 0.05%"];
+
+    // 输入体检：抽样统计唯一取值数 + 撞密度上限的像素比例
+    size_t n = _proxy.w * _proxy.h;
+    size_t step = n / 150000 + 1;
+    size_t m = 0;
+    for (size_t i = 0; i < n; i += step) m++;
+    int uni[3] = {0, 0, 0};
+    float *tmp = malloc(sizeof(float) * m);
+    if (tmp) {
+        for (int c = 0; c < 3; c++) {
+            size_t k = 0;
+            for (size_t i = 0; i < n && k < m; i += step) tmp[k++] = _proxy.rgb[i * 3 + c];
+            qsort(tmp, k, sizeof(float), cmpFloatAsc);
+            for (size_t i = 0; i < k; i++) if (!i || tmp[i] != tmp[i - 1]) uni[c]++;
+        }
+        free(tmp);
+    }
+    double loT = pow(10.0, -NEG_PI_CLIP_DEFAULT);
+    long capped = 0;
+    for (size_t i = 0; i < n; i++)
+        for (int c = 0; c < 3; c++) {
+            double T = (double)_proxy.rgb[i * 3 + c] / (t0[c] > 1e-9 ? t0[c] : 1e-9);
+            if (T <= loT) { capped++; break; }
+        }
+    int u = MIN(uni[0], MIN(uni[1], uni[2]));
+    double pct = 100.0 * (double)capped / (double)n;
+    NSString *verdict;
+    NSColor *col = C_OK();
+    if (u < 100) {
+        verdict = [NSString stringWithFormat:
+            @"某通道只有约 %d 个不同取值 —— 已被量化抠死，任何算法都只能猜。"
+            @"让店家重扫成 16-bit。", u];
+        col = C_WARN();
+    } else if (pct > 10) {
+        verdict = [NSString stringWithFormat:
+            @"%.1f%% 的像素撞到密度上限 %.1f，高光或暗部会整片塌掉。",
+            pct, NEG_PI_CLIP_DEFAULT];
+        col = C_WARN();
+    } else {
+        verdict = [NSString stringWithFormat:@"输入尚可。撞密度上限 %.1f%%。", pct];
+    }
+    _lblHealth.stringValue = verdict;
+    _lblHealth.textColor = col;
+}
+
+// ── 状态与步骤 ─────────────────────────────────────────────────────────────
+- (void)setStatus:(NSString *)s { _lblStatus.stringValue = s ?: @""; }
+
+- (void)refreshEnabled {
+    BOOL has = (_proxy.rgb != NULL);
+    _btnGrey.enabled = has;
+    _btnUndo.enabled = (_greys.count > 0);
+    _btnClearCal.enabled = has;
+    _btnGrey.title = [NSString stringWithFormat:@"点中性灰（%lu 块）", (unsigned long)_greys.count];
+
+    int step = 0;
+    if (has) step = 1;
+    if (has && (_haveBase || _segZero.selectedSegment == 0)) step = 2;
+    if (_greys.count >= 2 && fabs(_gamma[0] - 1.0) > 1e-9) step = 3;
+
+    NSArray *names = @[ @"① 打开", @"② 定零点", @"③ 解 γ", @"④ 导出" ];
+    NSMutableAttributedString *m = [NSMutableAttributedString new];
+    for (NSUInteger i = 0; i < names.count; i++) {
+        NSColor *c = (i == (NSUInteger)step) ? C_ACC()
+                                             : ((i < (NSUInteger)step) ? C_OK() : C_MUT());
+        NSDictionary *a = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:11.5
+                                                   weight:(i == (NSUInteger)step
+                                                               ? NSFontWeightSemibold
+                                                               : NSFontWeightRegular)],
+            NSForegroundColorAttributeName: c };
+        [m appendAttributedString:[[NSAttributedString alloc] initWithString:names[i]
+                                                                 attributes:a]];
+        if (i + 1 < names.count)
+            [m appendAttributedString:[[NSAttributedString alloc]
+                initWithString:(i < (NSUInteger)step ? @"  ✓  " : @"  →  ")
+                    attributes:@{ NSForegroundColorAttributeName: C_LINE() }]];
+    }
+    _lblSteps.attributedStringValue = m;
+}
+
+// ── 导出 ───────────────────────────────────────────────────────────────────
+- (void)exportDoc:(id)s {
+    if (!_full.rgb) { [self setStatus:@"先打开一张负片。"]; return; }
+    NSString *base = _currentPath.lastPathComponent.stringByDeletingPathExtension ?: @"negative";
+    NSSavePanel *p = [NSSavePanel savePanel];
+    p.nameFieldStringValue = [base stringByAppendingString:@"_positive.tif"];
+
+    NSPopUpButton *fmt = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 268, 25)];
+    [fmt addItemsWithTitles:@[ @"16-bit 线性 TIFF（留给自己调色）",
+                               @"8-bit JPEG（直接看）",
+                               @"8-bit PNG（直接看）" ]];
+    NSStackView *acc = hstack(@[ mkLabel(@"格式", 12, C_INK(), NO), fmt ], 10);
+    acc.frame = NSMakeRect(0, 0, 340, 44);
+    acc.edgeInsets = NSEdgeInsetsMake(8, 16, 8, 16);
+    p.accessoryView = acc;
+    if ([p runModal] != NSModalResponseOK) return;
+
+    NSInteger k = fmt.indexOfSelectedItem;
+    NSString *ext = (k == 1) ? @"jpg" : (k == 2 ? @"png" : @"tif");
+    NSURL *url = [[p.URL URLByDeletingPathExtension] URLByAppendingPathExtension:ext];
+
+    size_t n = _full.w * _full.h;
+    float *o = malloc(sizeof(float) * n * 3);
+    if (!o) { [self setStatus:@"内存不够。"]; return; }
+    double t0[3];
+    [self curT0:t0];
+    memcpy(o, _full.rgb, sizeof(float) * n * 3);
+    negInvert(o, n, t0, _gamma, _offset, _lRef,
+              pow(2.0, _slExposure.slider.doubleValue),
+              _slBlack.slider.doubleValue, NEG_PI_CLIP_DEFAULT);
+
+    char err[256] = {0};
+    int r;
+    if (k == 0) {
+        float hi = negGreenPercentile(o, _full.w, _full.h, DISP_PCT);
+        r = negSaveLinearTIFF(url.path.UTF8String, o, _full.w, _full.h,
+                              hi > 1e-6f ? hi : 1e-6f, err, sizeof(err));
+    } else {
+        float hi = negGreenPercentile(o, _full.w, _full.h, DISP_PCT);
+        r = negSaveDisplay8(url.path.UTF8String, o, _full.w, _full.h,
+                            hi > 1e-6f ? hi : 1e-6f, err, sizeof(err));
+    }
+    free(o);
+    [self setStatus:(r == 0)
+        ? [NSString stringWithFormat:@"已导出 %@", url.lastPathComponent]
+        : [NSString stringWithFormat:@"导出失败：%s", err]];
+}
+
+// ── 使用说明 ───────────────────────────────────────────────────────────────
+- (void)showGuide:(id)s {
+    if (!_guide) {
+        _guide = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 580)
+                                             styleMask:(NSWindowStyleMaskTitled |
+                                                        NSWindowStyleMaskClosable)
+                                               backing:NSBackingStoreBuffered defer:NO];
+        _guide.releasedWhenClosed = NO;
+        _guide.title = @"NegLab 使用说明";
+        _guide.backgroundColor = C_CARD();
+
+        NSTextView *tv = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 540)];
+        tv.editable = NO;
+        tv.drawsBackground = NO;
+        tv.textContainerInset = NSMakeSize(20, 18);
+        tv.verticallyResizable = YES;
+        tv.horizontallyResizable = NO;
+        tv.autoresizingMask = NSViewWidthSizable;
+        tv.textContainer.widthTracksTextView = YES;
+        [tv.textStorage setAttributedString:[self guideText]];
+
+        NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 660, 550)];
+        sv.hasVerticalScroller = YES;
+        sv.drawsBackground = NO;
+        sv.documentView = tv;
+        sv.translatesAutoresizingMaskIntoConstraints = NO;
+        [_guide.contentView addSubview:sv];
+        [NSLayoutConstraint activateConstraints:@[
+            [sv.leadingAnchor constraintEqualToAnchor:_guide.contentView.leadingAnchor],
+            [sv.trailingAnchor constraintEqualToAnchor:_guide.contentView.trailingAnchor],
+            [sv.topAnchor constraintEqualToAnchor:_guide.contentView.topAnchor],
+            [sv.bottomAnchor constraintEqualToAnchor:_guide.contentView.bottomAnchor],
+        ]];
+        [_guide center];
+    }
+    [_guide makeKeyAndOrderFront:nil];
+}
+
+- (NSAttributedString *)guideText {
+    NSMutableAttributedString *m = [NSMutableAttributedString new];
+    // 每段自己补一个换行 —— paragraphSpacing 只加间距，不换行。
+    void (^add)(NSString *, CGFloat, NSColor *, BOOL, CGFloat) =
+      ^(NSString *s, CGFloat size, NSColor *c, BOOL bold, CGFloat after) {
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.paragraphSpacing = after;
+        ps.lineSpacing = size * 0.38;
+        [m appendAttributedString:[[NSAttributedString alloc]
+            initWithString:[s stringByAppendingString:@"\n"]
+                attributes:@{
+                    NSFontAttributeName: bold ? [NSFont systemFontOfSize:size
+                                                              weight:NSFontWeightSemibold]
+                                              : [NSFont systemFontOfSize:size],
+                    NSForegroundColorAttributeName: c,
+                    NSParagraphStyleAttributeName: ps }]];
+    };
+
+    add(@"NegLab 使用说明", 19, C_INK(), YES, 6);
+    add(@"一句话：先把参数定下来（零点、逐通道密度斜率、偏移），再谈反相用什么方法。"
+        @"方法与方法之间的差别只有 0.1～0.3 档，而参数错了能差 5～20 档。",
+        12.5, C_MUT(), NO, 18);
+
+    add(@"第 1 步　打开", 15, C_INK(), YES, 5);
+    add(@"把负片拖进窗口，或按 ⌘O。能读两类：\n"
+        @"· 店家扫的扫描件。16-bit 的按「线性」解释，8-bit 的先反解 sRGB。\n"
+        @"· 你自己翻拍的相机 raw。用系统自带解码器，并尽量关掉相机内置的对比度、"
+        @"饱和度、高光恢复 —— 那些都是按通道施加的，会把密度斜率拧弯。",
+        12.5, C_INK(), NO, 16);
+
+    add(@"第 2 步　定零点（每帧都要做）", 15, C_INK(), YES, 5);
+    add(@"零点就是这一帧「密度为零」的那个透过率，负片上指未曝光的片基。\n"
+        @"· 最准：按「在图上点片基」，然后点负片最亮、最干净的那条边（通常挨着齿孔）。\n"
+        @"· 最省事：「自动」，取画面最亮的那 0.05%。黑白边多的画面够准，有强光就会偏。\n"
+        @"零点错了，后面用什么算法都救不回来。宁可多点一次。",
+        12.5, C_INK(), NO, 16);
+
+    add(@"第 3 步　解 γ（一个型号做一次）", 15, C_INK(), YES, 5);
+    add(@"γ 是逐通道密度斜率之比，它管的是「胶片型号 × 洗扫链路」，不用每卷重做。\n\n"
+        @"1. 按「点中性灰」，然后在负片上点你确定是中性的灰 —— 至少两块，亮度要拉开。\n"
+        @"　 拍过色卡最好，直接点卡上那条灰阶；没拍就找画面里的白墙、水泥地、阴天天空。\n"
+        @"　 每一块都点在正中央，别压在边缘上。\n"
+        @"2. 按「解算 γ」。界面会给出 σ₂/σ₁：小于 6% 说明这批点确实够中性。\n"
+        @"3. 按「存标定」。下次遇到同型号、同店家的卷，直接「载入」即可。\n\n"
+        @"为什么只点灰、不点彩色块：灰只约束「三通道斜率之比」这一件事，干净且可验证。"
+        @"彩色块还牵扯「颜色像不像」，那是另一笔投入（透射靶 + 光谱数据 + DCP 配置）。"
+        @"本项目解决的是中性与线性，不是颜色。",
+        12.5, C_INK(), NO, 16);
+
+    add(@"第 4 步　微调与导出", 15, C_INK(), YES, 5);
+    add(@"曝光和黑点只改明暗，不改中性，可以放心调。\n"
+        @"导出两种：\n"
+        @"· 16-bit 线性 TIFF：没套传输函数，留给 Photoshop 或达芬奇接着调。\n"
+        @"· 8-bit JPEG / PNG：套好 sRGB 传输函数，能直接看、直接发。",
+        12.5, C_INK(), NO, 16);
+
+    add(@"两件容易搞混的事", 15, C_INK(), YES, 5);
+    add(@"· 密度不是透过率。反相的本质是 D = −log₁₀(T)，不是 1−T。用 1−T 出来的正片，"
+        @"灰阶会被压扁、暗部发闷。\n"
+        @"· 零点每帧定，γ 一次定。把 γ 当成白平衡、每张都调，就是把一次性的东西"
+        @"当成了每帧的东西，越调越乱。",
+        12.5, C_INK(), NO, 16);
+
+    add(@"一句话的诚实声明", 15, C_INK(), YES, 5);
+    add(@"负片里没有标准答案。上面每一步的结果都以「你自己点的那几块中性灰」为准。"
+        @"这个工具保证的是数学没错、参数可复核，它不能保证你的灰真的中性。",
+        12.5, C_MUT(), NO, 4);
+    return m;
+}
+@end
+
+// ═══════════════════════════════════════════════ 入口
+
+int main(int argc, const char **argv) {
+    @autoreleasepool {
+        if (argc > 1) gLaunchPath = [NSString stringWithUTF8String:argv[1]];
+        if (argc > 2) gLaunchCalib = [NSString stringWithUTF8String:argv[2]];
+        NSApplication *app = NSApplication.sharedApplication;
+        NegApp *d = [NegApp new];
+        app.delegate = d;
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [app run];
+    }
+    return 0;
+}

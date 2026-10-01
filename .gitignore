@@ -1,4 +1,4 @@
-# 用户自己的照片与扫描件——永远不要提交
+# 用户自己的照片与扫描件 —— 永远不要提交
 *.TIF
 *.tif
 *.TIFF
@@ -23,3 +23,9 @@ __pycache__/
 Icon?
 _icon.iconset/
 NegLab_linear/
+
+# 命令行工具的可执行文件（用 tools/build_tools.sh 现编）
+/tools/mathtest
+/tools/imgtest
+/tools/calib_cli
+/tools/raw2linear
