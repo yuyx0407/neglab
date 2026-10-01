@@ -1,0 +1,138 @@
+{
+ "source": "000364980009.TIF",
+ "gamma": [
+  0.933081,
+  1.0,
+  1.626446
+ ],
+ "offset": [
+  0.546979,
+  0.573581,
+  0.776673
+ ],
+ "L_base": -0.545772,
+ "rank1_resid_D": 0.0397,
+ "sigma2_over_sigma1_pct": 3.98,
+ "grey_patch_lin": [
+  [
+   0.13563,
+   0.07421,
+   0.01229
+  ],
+  [
+   0.14413,
+   0.07819,
+   0.0137
+  ],
+  [
+   0.18447,
+   0.0999,
+   0.02122
+  ],
+  [
+   0.24228,
+   0.13843,
+   0.0382
+  ],
+  [
+   0.32778,
+   0.1912,
+   0.0648
+  ],
+  [
+   0.50888,
+   0.30054,
+   0.11444
+  ]
+ ],
+ "col_ranking": [
+  {
+   "col_index": 4,
+   "page": "左",
+   "rank1_resid_D": 0.0397,
+   "sigma2_over_sigma1_pct": 3.98,
+   "gamma_ratio": [
+    0.933,
+    1.0,
+    1.626
+   ]
+  },
+  {
+   "col_index": 5,
+   "page": "右",
+   "rank1_resid_D": 0.06,
+   "sigma2_over_sigma1_pct": 4.92,
+   "gamma_ratio": [
+    0.918,
+    1.0,
+    1.679
+   ]
+  },
+  {
+   "col_index": 2,
+   "page": "左",
+   "rank1_resid_D": 0.0724,
+   "sigma2_over_sigma1_pct": 5.58,
+   "gamma_ratio": [
+    0.899,
+    1.0,
+    1.623
+   ]
+  },
+  {
+   "col_index": 8,
+   "page": "右",
+   "rank1_resid_D": 0.3959,
+   "sigma2_over_sigma1_pct": 26.87,
+   "gamma_ratio": [
+    0.229,
+    1.0,
+    2.502
+   ]
+  },
+  {
+   "col_index": 3,
+   "page": "左",
+   "rank1_resid_D": 0.1846,
+   "sigma2_over_sigma1_pct": 29.68,
+   "gamma_ratio": [
+    0.984,
+    1.0,
+    1.332
+   ]
+  },
+  {
+   "col_index": 7,
+   "page": "右",
+   "rank1_resid_D": 1.1286,
+   "sigma2_over_sigma1_pct": 43.88,
+   "gamma_ratio": [
+    2.295,
+    1.0,
+    -5.151
+   ]
+  },
+  {
+   "col_index": 1,
+   "page": "左",
+   "rank1_resid_D": 2.0759,
+   "sigma2_over_sigma1_pct": 48.77,
+   "gamma_ratio": [
+    -4.119,
+    1.0,
+    11.091
+   ]
+  },
+  {
+   "col_index": 6,
+   "page": "右",
+   "rank1_resid_D": 5.0725,
+   "sigma2_over_sigma1_pct": 58.53,
+   "gamma_ratio": [
+    -7.838,
+    1.0,
+    14.522
+   ]
+  }
+ ]
+}

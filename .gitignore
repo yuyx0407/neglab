@@ -1,0 +1,25 @@
+# 用户自己的照片与扫描件——永远不要提交
+*.TIF
+*.tif
+*.TIFF
+*.ARW
+*.arw
+*.CR3
+*.cr3
+*.NEF
+*.nef
+*.DNG
+*.dng
+*.RAF
+*.JPG
+*.jpg
+!docs/*.json
+
+# 编译产物与本地状态
+__pycache__/
+*.pyc
+*.app/
+.DS_Store
+Icon?
+_icon.iconset/
+NegLab_linear/
