@@ -9,7 +9,22 @@ MIT 许可。
 
 ---
 
-## 快速开始
+## 安装
+
+### 方式一：下载预编译版本
+
+从 [Releases](https://github.com/yuyx0407/neglab/releases/latest) 下载
+`NegLab-3.0-macos-universal.zip`（约 100 KB），解压后把 `NegLab.app` 拖进「应用程序」。
+
+Apple 芯片与 Intel 机器通用，需要 macOS 12 或更高版本。程序不联网，不写系统目录，
+不需要安装 Python 或任何依赖。
+
+本版本未经 Apple 公证，首次打开时系统会提示「无法验证开发者」。两种处理方式：
+
+- 在访达里右键点击 `NegLab.app`，选「打开」，再确认一次；
+- 或在终端执行一次：`xattr -dr com.apple.quarantine /Applications/NegLab.app`
+
+### 方式二：从源码构建
 
 ```bash
 git clone https://github.com/yuyx0407/neglab.git
@@ -17,14 +32,18 @@ cd neglab
 ./app/build_app.sh --install     # 编译并拷到 /Applications
 ```
 
-若只想试编译结果，用 `./app/build_app.sh --run`。
+只需要系统自带的 clang，不需要 Xcode 工程文件。若只想试编译结果，用 `./app/build_app.sh --run`。
 
-使用流程共四步：
+---
 
-1. 打开负片（拖入窗口，或按 ⌘O）
-2. 定零点：在图上点一下未曝光的片基，或改用自动估计
-3. 解 γ：在几块中性灰上各点一下，按「解算 γ」
-4. 导出
+## 使用流程
+
+共四步：
+
+1. 打开负片（拖入窗口，或按 ⌘O）；
+2. 定零点：在图上点一下未曝光的片基，或改用自动估计；
+3. 解 γ：在几块中性灰上各点一下，按「解算 γ」；
+4. 导出。
 
 **γ 对一个「胶片型号 × 扫描链路」只需解一次**，此后每次换卷只重复第 1、2 步。
 

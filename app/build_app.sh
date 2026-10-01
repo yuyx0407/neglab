@@ -21,13 +21,31 @@ rm -rf "$APP"
 
 echo "── 编译（clang，Objective-C ARC）"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+# 通用二进制：Apple 芯片与 Intel 机器都能跑。多出来的那点体积可以忽略。
+# 若 SDK 里缺 x86_64 切片就退回单架构，不因此中断构建。
+set +e
 clang -O2 -fobjc-arc -Wall \
+      -arch arm64 -arch x86_64 \
       -mmacosx-version-min=12.0 \
       -Wno-deprecated-declarations \
       -framework Cocoa -framework ImageIO -framework CoreImage \
       -framework QuartzCore -framework UniformTypeIdentifiers -framework Foundation \
       -o "$BIN" \
       "$HERE/main.m" "$HERE/NegImage.m" "$HERE/NegMath.m"
+RC=$?
+set -e
+if [[ $RC -ne 0 ]]; then
+  echo "   （通用二进制失败，退回本机架构）"
+  clang -O2 -fobjc-arc -Wall \
+        -mmacosx-version-min=12.0 \
+        -Wno-deprecated-declarations \
+        -framework Cocoa -framework ImageIO -framework CoreImage \
+        -framework QuartzCore -framework UniformTypeIdentifiers -framework Foundation \
+        -o "$BIN" \
+        "$HERE/main.m" "$HERE/NegImage.m" "$HERE/NegMath.m"
+fi
+echo "   架构：$(lipo -archs "$BIN" 2>/dev/null || file -b "$BIN")"
 
 echo "── 组装 bundle"
 cat > "$APP/Contents/Info.plist" <<PLIST
