@@ -29,12 +29,19 @@ static void setIf(id obj, NSString *key, id val) {
     @try { [obj setValue:val forKey:key]; } @catch (NSException *e) { (void)e; }
 }
 
-// ── 相机 raw → CGImage（扩展线性 sRGB）──────────────────────────────────────
+// ── 相机 raw → CGImage（线性）───────────────────────────────────────────────
 // 属性名必须用运行时那套 input*（CIRAWFilterImpl 继承 CIFilter 的命名），
 // 而不是 CIRAWFilter 头文件里那套 —— 照头文件写会「一项都没生效」。
 // 关掉相机外观的理由：内置对比度 / 饱和度 / 高光恢复都是**按通道**施加的，
 // 会把逐通道密度斜率拧弯，而那正是我们要测的量。详见 tools/raw2linear.m。
-static CGImageRef rawToCGImage(const char *path, char *err, size_t errLen) {
+//
+// ★ 第二趟曝光补偿是必须的，不是保险。负片上最亮的区域就是未曝光的片基，
+//   而相机翻拍时曝光通常会给到「片基接近满量程」。CI 渲染成 16 位整数时超出
+//   1.0 的部分被直接削平 —— 削掉的恰恰是零点要用的那部分（实测某张 NEF 的
+//   红通道有 12.3% 的像素在 1.0 以上），于是零点被解成 1.0，全画面崩掉。
+//   所以先渲染一张四分之一的小图，量出「每像素三通道最大值」的 99.95 百分位，
+//   据此补一个只降不升的 EV，把最亮处压到 0.98 以下再正式渲染。
+static CGImageRef rawToCGImage(const char *path, char *err, size_t errLen, double *evUsed) {
     NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
     CIRAWFilter *f = (CIRAWFilter *)[CIFilter filterWithImageURL:url options:@{}];
     if (!f) { setErr(err, errLen, @"系统不支持这个 raw（Core Image 认不出它的机型）"); return NULL; }
@@ -52,12 +59,7 @@ static CGImageRef rawToCGImage(const char *path, char *err, size_t errLen) {
     setIf(f, @"inputLuminanceNoiseReductionAmount", @0.0f);
     setIf(f, @"inputNoiseReductionAmount",          @0.0f);
     setIf(f, @"inputMoireAmount",                   @0.0f);
-    setIf(f, @"inputScaleFactor",                   @1.0f);
-    setIf(f, @"inputEV",                            @0.0);
-
-    CIImage *out = f.outputImage;
-    if (!out) { setErr(err, errLen, @"raw 解码失败"); return NULL; }
-    out = [out imageByCroppingToRect:CGRectMake(0, 0, f.nativeSize.width, f.nativeSize.height)];
+    setIf(f, @"inputIgnoreOrientation",             @NO);
 
     CGColorSpaceRef lin = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
     CIContext *ctx = [CIContext contextWithOptions:@{
@@ -65,6 +67,52 @@ static CGImageRef rawToCGImage(const char *path, char *err, size_t errLen) {
         kCIContextOutputColorSpace:   (__bridge id)lin,
         kCIContextCacheIntermediates: @NO,
     }];
+
+    // ── 第一趟：小图探顶 ────────────────────────────────────────────────────
+    double ev = 0.0;
+    {
+        setIf(f, @"inputScaleFactor", @0.25f);
+        setIf(f, @"inputEV",          @0.0f);
+        CIImage *s = f.outputImage;
+        if (s) {
+            s = [s imageByCroppingToRect:CGRectMake(0, 0, f.nativeSize.width, f.nativeSize.height)];
+            size_t w = (size_t)f.nativeSize.width, h = (size_t)f.nativeSize.height;
+            if (w > 0 && h > 0 && w * h < 40u * 1000u * 1000u) {
+                size_t rb = w * 4 * sizeof(float);
+                float *buf = malloc(rb * h);
+                float *peak = malloc(sizeof(float) * w * h);
+                if (buf && peak) {
+                    [ctx render:s toBitmap:buf rowBytes:rb bounds:s.extent
+                          format:kCIFormatRGBAf colorSpace:lin];
+                    size_t n = 0;
+                    for (size_t i = 0; i < w * h; i++) {
+                        if (buf[i * 4 + 3] <= 0) continue;      // 跳过无效像素
+                        float m = buf[i * 4];
+                        if (buf[i * 4 + 1] > m) m = buf[i * 4 + 1];
+                        if (buf[i * 4 + 2] > m) m = buf[i * 4 + 2];
+                        peak[n++] = m;
+                    }
+                    if (n > 1000) {
+                        float p = negPercentileFast(peak, n, 99.95);
+                        if (p > 0.98f) ev = -log2((double)p / 0.98);
+                        if (ev < -6.0) ev = -6.0;               // 别把画面压死
+                    }
+                }
+                free(buf);
+                free(peak);
+            }
+        }
+    }
+
+    // ── 第二趟：正式渲染 ────────────────────────────────────────────────────
+    setIf(f, @"inputScaleFactor", @1.0f);
+    setIf(f, @"inputEV",          @(ev));
+    if (evUsed) *evUsed = ev;
+
+    CIImage *out = f.outputImage;
+    if (!out) { CGColorSpaceRelease(lin); setErr(err, errLen, @"raw 解码失败"); return NULL; }
+    out = [out imageByCroppingToRect:CGRectMake(0, 0, f.nativeSize.width, f.nativeSize.height)];
+
     CGImageRef cg = [ctx createCGImage:out fromRect:out.extent
                                  format:kCIFormatRGBA16 colorSpace:lin];
     CGColorSpaceRelease(lin);
@@ -72,11 +120,13 @@ static CGImageRef rawToCGImage(const char *path, char *err, size_t errLen) {
     return cg;
 }
 
-static CGImageRef loadCGImage(const char *path, char *err, size_t errLen, int *fromRaw) {
+static CGImageRef loadCGImage(const char *path, char *err, size_t errLen,
+                              int *fromRaw, double *evUsed) {
     if (fromRaw) *fromRaw = 0;
+    if (evUsed) *evUsed = 0.0;
     if (negIsRawExt(path)) {
         if (fromRaw) *fromRaw = 1;
-        return rawToCGImage(path, err, errLen);
+        return rawToCGImage(path, err, errLen, evUsed);
     }
     NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
     CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
@@ -85,6 +135,48 @@ static CGImageRef loadCGImage(const char *path, char *err, size_t errLen, int *f
     CFRelease(src);
     if (!cg) setErr(err, errLen, @"解码失败（可能是不支持的位深或压缩方式）");
     return cg;
+}
+
+// 挑一个「整数位图上下文」能用的色彩空间。
+//
+// ★ 这里有个不显眼的坑：苹果的**扩展**色彩空间（kCGColorSpaceExtendedSRGB、
+//   kCGColorSpaceExtendedLinearSRGB）**不能**用于整数位图上下文，只能配 32 位浮点。
+//   而 Core Image 解码 raw 之后给出的 CGImage 恰恰就是扩展线性 sRGB ——
+//   于是照抄过来建上下文必然失败，NEF 一张都读不进来（报「建不出位图上下文」）。
+//   同族的非扩展版本传输函数完全一样，[0,1] 区间内的数值不会被改动，
+//   所以换成 LinearSRGB / sRGB 只是丢掉了超出范围的部分，正是我们要的。
+//
+// 顺序是「能不改就不改」：先用源空间本身，不行再退到同族的非扩展版本。
+// 源本身是线性的就优先 LinearSRGB，否则优先 sRGB —— 退错了会把传输函数套第二遍。
+static CGColorSpaceRef pickIntSpace(CGColorSpaceRef src, size_t bpc, CGBitmapInfo info, BOOL *own) {
+    CGColorSpaceRef lin = CGColorSpaceCreateWithName(kCGColorSpaceLinearSRGB);
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    BOOL srcLinear = NO;
+    if (src) {
+        CFStringRef nm = CGColorSpaceCopyName(src);
+        if (nm) {
+            srcLinear = (CFStringFind(nm, CFSTR("Linear"), kCFCompareCaseInsensitive).location
+                         != kCFNotFound);
+            CFRelease(nm);
+        }
+    }
+    CGColorSpaceRef cands[3];
+    int n = 0;
+    if (src) cands[n++] = src;
+    if (srcLinear) { cands[n++] = lin; cands[n++] = srgb; }
+    else           { cands[n++] = srgb; cands[n++] = lin; }
+
+    CGColorSpaceRef chosen = NULL;
+    for (int i = 0; i < n; i++) {
+        if (!cands[i]) continue;
+        CGContextRef probe = CGBitmapContextCreate(NULL, 2, 2, bpc, 32, cands[i], info);
+        if (probe) { CGContextRelease(probe); chosen = cands[i]; break; }
+    }
+    if (!chosen) chosen = CGColorSpaceCreateDeviceRGB(), *own = YES;
+    else *own = (chosen == lin || chosen == srgb);
+    if (lin != chosen) CGColorSpaceRelease(lin);
+    if (srgb != chosen) CGColorSpaceRelease(srgb);
+    return chosen;
 }
 
 // CGImage → 线性 float。按位深决定要不要反解 sRGB。
@@ -96,38 +188,25 @@ static float *cgToLinearRGB(CGImageRef cg, size_t *outW, size_t *outH,
     int is8 = (bpc <= 8);
     if (bits) *bits = (int)bpc;
 
-    CGColorSpaceRef space = CGImageGetColorSpace(cg);
+    CGBitmapInfo info = (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
+    if (!is8) info |= kCGBitmapByteOrder16Little;
     BOOL ownSpace = NO;
-    if (!space) { space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB); ownSpace = YES; }
-    CGColorSpaceModel model = CGColorSpaceGetModel(space);
-    if (model != kCGColorSpaceModelRGB && model != kCGColorSpaceModelMonochrome) {
-        // 少见但确实会遇到（比如灰度扫的正片）。转成 sRGB 再来。
-        if (!ownSpace) CGColorSpaceRelease(space);
-        space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-        ownSpace = YES;
-    }
+    CGColorSpaceRef space = pickIntSpace(CGImageGetColorSpace(cg), is8 ? 8 : 16, info, &ownSpace);
 
     size_t comp = 4, bpcs = is8 ? 1 : 2;
     size_t bpr = w * comp * bpcs;
     void *buf = calloc(h, bpr);
-    if (!buf) { if (ownSpace) CGColorSpaceRelease(space); setErr(err, errLen, @"内存不够"); return NULL; }
-
-    CGBitmapInfo info = (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
-    if (!is8) info |= kCGBitmapByteOrder16Little;
+    if (!buf) {
+        if (ownSpace) CGColorSpaceRelease(space);
+        setErr(err, errLen, @"内存不够");
+        return NULL;
+    }
     CGContextRef ctx = CGBitmapContextCreate(buf, w, h, is8 ? 8 : 16, bpr, space, info);
     if (!ctx) {
-        // 某些色彩空间不接受 16 位整数上下文，退一步用扩展线性 sRGB（仍是同一套数值）
         free(buf);
-        CGColorSpaceRef alt = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
-        buf = calloc(h, bpr);
-        ctx = CGBitmapContextCreate(buf, w, h, is8 ? 8 : 16, bpr, alt, info);
-        CGColorSpaceRelease(alt);
-        if (!ctx) {
-            free(buf);
-            if (ownSpace) CGColorSpaceRelease(space);
-            setErr(err, errLen, @"建不出位图上下文");
-            return NULL;
-        }
+        if (ownSpace) CGColorSpaceRelease(space);
+        setErr(err, errLen, @"建不出位图上下文");
+        return NULL;
     }
     CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), cg);
     CGContextRelease(ctx);
@@ -156,7 +235,8 @@ int negLoadFrame(const char *path, NegFrame *out,
     if (!path || !out) return -1;
     memset(out, 0, sizeof(*out));
     int fromRaw = 0, bits = 8;
-    CGImageRef cg = loadCGImage(path, err, errLen, &fromRaw);
+    double ev = 0.0;
+    CGImageRef cg = loadCGImage(path, err, errLen, &fromRaw, &ev);
     if (!cg) return -1;
     size_t w = 0, h = 0;
     float *rgb = cgToLinearRGB(cg, &w, &h, &bits, err, errLen);
@@ -164,9 +244,16 @@ int negLoadFrame(const char *path, NegFrame *out,
     if (!rgb) return -1;
 
     if (enc && encLen) {
-        if (fromRaw) snprintf(enc, encLen, "相机 raw → 线性（已关掉相机外观）");
-        else if (bits <= 8) snprintf(enc, encLen, "8-bit → 反解 sRGB 得线性");
-        else snprintf(enc, encLen, "%d-bit → 视为线性", bits);
+        if (fromRaw) {
+            if (fabs(ev) >= 0.05)
+                snprintf(enc, encLen, "相机 raw → 线性（防削顶，自动降 %.2f EV）", ev);
+            else
+                snprintf(enc, encLen, "相机 raw → 线性");
+        } else if (bits <= 8) {
+            snprintf(enc, encLen, "8-bit → 反解 sRGB 得线性");
+        } else {
+            snprintf(enc, encLen, "%d-bit → 视为线性", bits);
+        }
     }
     out->rgb = rgb; out->w = w; out->h = h;
     return 0;
@@ -333,7 +420,10 @@ static int writeImage(const char *path, CGImageRef cg, CFStringRef type,
     return 0;
 }
 
-// 16-bit 灰度? 不 —— 16-bit RGB，字节序与上下文一致，直接包装成 CGImage。
+// 把 float 缓冲包成 16-bit CGImage。上下文用 **LinearSRGB**（不能用扩展版，
+// 见 pickIntSpace 的说明）：数据本来就是线性的，非扩展版传输函数相同，
+// 只是少了超出范围的部分。原来用扩展线性 sRGB 建上下文，这里必然失败 ——
+// 也就是「导出 16-bit TIFF」一直是坏的。
 static CGImageRef wrap16(const float *rgb, size_t w, size_t h, float hi) {
     size_t bpr = w * 4 * 2;
     uint16_t *buf = malloc(h * bpr);
@@ -347,9 +437,10 @@ static CGImageRef wrap16(const float *rgb, size_t w, size_t h, float hi) {
             if (v > 1) v = 1;
             buf[i * 4 + c] = (uint16_t)(v * 65535.0 + 0.5);
         }
-    CGColorSpaceRef lin = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+    CGColorSpaceRef lin = CGColorSpaceCreateWithName(kCGColorSpaceLinearSRGB);
     CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 16, bpr, lin,
-                                             kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder16Little);
+                                             (CGBitmapInfo)kCGImageAlphaNoneSkipLast |
+                                             kCGBitmapByteOrder16Little);
     CGImageRef cg = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
     if (ctx) CGContextRelease(ctx);
     CGColorSpaceRelease(lin);

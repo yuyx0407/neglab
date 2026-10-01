@@ -12,33 +12,50 @@
 #include <math.h>
 #include <string.h>
 
-// ═══════════════════════════════════════════════ 外观常量
-
-// 命令行给的路径。在 main 里存下来，等界面搭好再读 ——
-// 发通知会有时序依赖（观察者可能还没注册），这里不留这个不确定性。
+// ═══════════════════════════════════════════════ 设计尺度
+//
+// 全部对齐 macOS 人机界面指南。两条硬规矩：
+//
+// ① **只用语义颜色**（labelColor / secondaryLabelColor / controlBackgroundColor /
+//    separatorColor / controlAccentColor / systemGreen…）。它们会随浅色与深色外观
+//    自动切换。写死 RGB 的界面在深色模式下一定翻车，这是最常见的低级错误。
+// ② **只规定四种字号**：11 节标题、13 正文、11 说明、11.5 等宽数值。
+//    上一版用了 10.5 / 11 / 11.5 / 12 / 12.5 / 19 六种字号且都偏小，中文挤成一团。
+//    现在正文一律 13，说明文字也是 11，靠颜色深浅分层而不是靠字号。
 static NSString *gLaunchPath = nil;      // argv[1]：要打开的负片
 static NSString *gLaunchCalib = nil;     // argv[2]：可选，跟着一起载入的标定 json
 
-static const CGFloat PANEL_W = 340;
+static const CGFloat PANEL_W       = 350;   // 检查器宽度
 static const CGFloat PROXY_MAX_DIM = 1500;
+static const CGFloat PAD_SIDE      = 16;    // 侧栏外边距
+static const CGFloat PAD_CARD      = 14;    // 卡片内边距
+static const CGFloat GAP_CARD      = 12;    // 卡片之间
+static const CGFloat GAP_ROW       = 8;     // 卡片内行距
+static const CGFloat SIDEBAR_TEXT_W = 264;  // 侧栏里折行文字的排版宽度
 
-static NSColor *C_BG(void)   { return [NSColor colorWithSRGBRed:0.965 green:0.965 blue:0.972 alpha:1]; }
-static NSColor *C_CARD(void) { return [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:1]; }
-static NSColor *C_LINE(void) { return [NSColor colorWithSRGBRed:0.886 green:0.886 blue:0.902 alpha:1]; }
-static NSColor *C_INK(void)  { return [NSColor colorWithSRGBRed:0.113 green:0.113 blue:0.122 alpha:1]; }
-static NSColor *C_MUT(void)  { return [NSColor colorWithSRGBRed:0.525 green:0.525 blue:0.545 alpha:1]; }
-static NSColor *C_ACC(void)  { return [NSColor colorWithSRGBRed:0.000 green:0.443 blue:0.890 alpha:1]; }
-static NSColor *C_OK(void)   { return [NSColor colorWithSRGBRed:0.114 green:0.541 blue:0.306 alpha:1]; }
-static NSColor *C_WARN(void) { return [NSColor colorWithSRGBRed:0.753 green:0.224 blue:0.169 alpha:1]; }
+static NSColor *C_ACCENT(void) { return NSColor.controlAccentColor; }
+static NSColor *C_OK(void)     { return NSColor.systemGreenColor; }
+static NSColor *C_WARN(void)   { return NSColor.systemRedColor; }
+static NSColor *C_INK(void)    { return NSColor.labelColor; }
+static NSColor *C_MUT(void)    { return NSColor.secondaryLabelColor; }
+static NSColor *C_FAINT(void)  { return NSColor.tertiaryLabelColor; }
+static NSColor *C_SURFACE(void){ return NSColor.controlBackgroundColor; }
+static NSColor *C_HAIR(void)   { return NSColor.separatorColor; }
+
+static NSFont *F_SECTION(void) { return [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold]; }
+static NSFont *F_BODY(void)    { return [NSFont systemFontOfSize:13]; }
+static NSFont *F_SMALL(void)   { return [NSFont systemFontOfSize:11]; }
+static NSFont *F_VALUE(void)   { return [NSFont monospacedDigitSystemFontOfSize:11.5
+                                                                    weight:NSFontWeightRegular]; }
 
 // ═══════════════════════════════════════════════ 小工具
 
-static NSTextField *mkLabel(NSString *s, CGFloat size, NSColor *color, BOOL bold) {
+static NSTextField *mkLabel(NSString *s, NSFont *font, NSColor *color) {
     NSTextField *t = [NSTextField labelWithString:s];
-    t.font = bold ? [NSFont systemFontOfSize:size weight:NSFontWeightSemibold]
-                  : [NSFont systemFontOfSize:size];
+    t.font = font;
     t.textColor = color;
     t.lineBreakMode = NSLineBreakByWordWrapping;
+    t.maximumNumberOfLines = 0;          // 0 = 不限行数；这是「文字显示不全」的根治办法
     t.usesSingleLineMode = NO;
     t.selectable = NO;
     [t setContentHuggingPriority:NSLayoutPriorityDefaultLow - 1
@@ -48,18 +65,45 @@ static NSTextField *mkLabel(NSString *s, CGFloat size, NSColor *color, BOOL bold
     return t;
 }
 
-static NSTextField *mkMono(NSString *s, CGFloat size, NSColor *color) {
-    NSTextField *t = [NSTextField labelWithString:s];
-    t.font = [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightRegular];
-    t.textColor = color;
-    t.selectable = YES;
-    t.usesSingleLineMode = NO;
+// 单行标签（标题、数值这类不该折行的）
+static NSTextField *mkLabel1(NSString *s, NSFont *font, NSColor *color) {
+    NSTextField *t = mkLabel(s, font, color);
+    t.usesSingleLineMode = YES;
+    t.maximumNumberOfLines = 1;
+    return t;
+}
+
+// 卡片里的说明文字。**必须给 preferredMaxLayoutWidth** ——
+// 自动折行的标签如果不知道自己的行宽，AppKit 会按「单行宽度」算高度，
+// 于是卡片里会多出一大截空白（侧栏里看起来就像卡片之间隔着一条河）。
+static NSTextField *mkHelp(NSString *s) {
+    NSTextField *t = mkLabel(s, F_SMALL(), C_MUT());
+    t.preferredMaxLayoutWidth = SIDEBAR_TEXT_W;
+    // 抗压缩拉到 required：说明文字宁可把卡片撑高，也不许被压成「…」。
+    // 这正是「文字显示不全」的根源 —— 布局为了塞下别的控件，把说明行挤掉了。
+    [t setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                forOrientation:NSLayoutConstraintOrientationVertical];
+    return t;
+}
+
+// 等宽数字标签。数值列必须等宽，否则拖动滑杆时数字会左右跳。
+static NSTextField *mkValue(NSString *s) {
+    NSTextField *t = mkLabel1(s, F_VALUE(), C_MUT());
+    t.alignment = NSTextAlignmentRight;
+    [t setContentHuggingPriority:NSLayoutPriorityRequired
+                  forOrientation:NSLayoutConstraintOrientationHorizontal];
     return t;
 }
 
 static NSButton *mkButton(NSString *title, id target, SEL action) {
+    return [NSButton buttonWithTitle:title target:target action:action];
+}
+
+// 带 SF Symbol 图标的按钮（macOS 13 起的标配做法）
+static NSButton *mkSymbolButton(NSString *symbol, NSString *title, id target, SEL action) {
     NSButton *b = [NSButton buttonWithTitle:title target:target action:action];
-    b.bezelStyle = NSBezelStyleRounded;
+    NSImage *img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:title];
+    if (img) { b.image = img; b.imagePosition = NSImageLeading; }
     return b;
 }
 
@@ -82,37 +126,56 @@ static NSStackView *hstack(NSArray<NSView *> *views, CGFloat spacing) {
     return s;
 }
 
-// 卡片：白底 + 1px 边 + 10pt 圆角。用普通 NSView 自己画，避免 NSBox 的内容视图规则。
-// qsort 的比较函数必须是函数指针（C 的 qsort 收不了 block）
 static int cmpFloatAsc(const void *a, const void *b) {
     float x = *(const float *)a, y = *(const float *)b;
     return (x < y) ? -1 : (x > y ? 1 : 0);
 }
 
-static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
-    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
-    box.wantsLayer = YES;
-    box.layer.backgroundColor = C_CARD().CGColor;
-    box.layer.borderColor = C_LINE().CGColor;
-    box.layer.borderWidth = 1;
-    box.layer.cornerRadius = 10;
+// 卡片。用普通 NSView，但走 updateLayer 上色 —— 这样切换深色外观时 AppKit 会
+// 重新调用它，颜色才跟着变。直接把 CGColor 写进 layer 是静态的，外观一变就留在旧颜色。
+@interface NegCard : NSView
+@property (nonatomic, strong) NSTextField *titleLabel;
+@end
+
+@implementation NegCard
+- (BOOL)wantsUpdateLayer { return YES; }
+- (void)updateLayer {
+    self.layer.backgroundColor = C_SURFACE().CGColor;
+    self.layer.borderColor = C_HAIR().CGColor;
+    self.layer.borderWidth = 1;
+    self.layer.cornerRadius = 9;
+    self.layer.cornerCurve = kCACornerCurveContinuous;
+}
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    self.needsDisplay = YES;
+}
+@end
+
+// 卡片工厂：标题（可着色成当前步骤）+ 若干行
+static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
+    NegCard *box = [[NegCard alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
     box.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSMutableArray<NSView *> *all = [NSMutableArray array];
     NSMutableArray<NSNumber *> *gap = [NSMutableArray array];
-    if (title.length) { [all addObject:mkLabel(title, 11.5, C_MUT(), YES)]; [gap addObject:@7]; }
-    for (NSView *r in rows) { [all addObject:r]; [gap addObject:@8]; }
+    if (title.length) {
+        box.titleLabel = mkLabel(title, F_SECTION(), C_MUT());
+        [all addObject:box.titleLabel];
+        [gap addObject:@8];
+    }
+    for (NSView *r in rows) { [all addObject:r]; [gap addObject:@(GAP_ROW)]; }
 
-    NSStackView *st = vstack(all, 8);
+    NSStackView *st = vstack(all, GAP_ROW);
     for (NSUInteger i = 0; i + 1 < st.arrangedSubviews.count; i++)
         [st setCustomSpacing:gap[i].doubleValue afterView:st.arrangedSubviews[i]];
 
     [box addSubview:st];
     [NSLayoutConstraint activateConstraints:@[
-        [st.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:12],
-        [st.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-12],
-        [st.topAnchor constraintEqualToAnchor:box.topAnchor constant:11],
-        [st.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-12],
+        [st.leadingAnchor  constraintEqualToAnchor:box.leadingAnchor constant:PAD_CARD],
+        [st.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-PAD_CARD],
+        [st.topAnchor      constraintEqualToAnchor:box.topAnchor constant:PAD_CARD - 2],
+        [st.bottomAnchor   constraintEqualToAnchor:box.bottomAnchor constant:-(PAD_CARD - 2)],
     ]];
     return box;
 }
@@ -134,30 +197,31 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
     self.spacing = 8;
     self.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *t = mkLabel(title, 12, C_INK(), NO);
+    NSTextField *t = mkLabel1(title, F_BODY(), C_INK());
     t.translatesAutoresizingMaskIntoConstraints = NO;
-    [t.widthAnchor constraintEqualToConstant:40].active = YES;
+    [t.widthAnchor constraintEqualToConstant:46].active = YES;
     [t setContentHuggingPriority:NSLayoutPriorityRequired
                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [t setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     _slider = [NSSlider sliderWithValue:val minValue:lo maxValue:hi target:nil action:nil];
     _slider.continuous = YES;
+    _slider.controlSize = NSControlSizeSmall;
     _slider.translatesAutoresizingMaskIntoConstraints = NO;
     [_slider setContentHuggingPriority:NSLayoutPriorityDefaultLow - 2
                         forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_slider setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 2
                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    _value = mkMono([NSString stringWithFormat:fmt, val], 11.5, C_MUT());
-    _value.alignment = NSTextAlignmentRight;
+    _value = mkValue([NSString stringWithFormat:fmt, val]);
     _value.translatesAutoresizingMaskIntoConstraints = NO;
-    [_value.widthAnchor constraintEqualToConstant:56].active = YES;
-    [_value setContentHuggingPriority:NSLayoutPriorityRequired
-                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_value.widthAnchor constraintEqualToConstant:58].active = YES;
 
     [self addArrangedSubview:t];
     [self addArrangedSubview:_slider];
     [self addArrangedSubview:_value];
+    [self.heightAnchor constraintGreaterThanOrEqualToConstant:24].active = YES;
     return self;
 }
 @end
@@ -230,7 +294,7 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
         CGFloat x = _imgRect.origin.x + [m[@"nx"] doubleValue] * _imgRect.size.width;
         CGFloat y = _imgRect.origin.y + [m[@"ny"] doubleValue] * _imgRect.size.height;
         BOOL base = [m[@"kind"] isEqualToString:@"base"];
-        NSColor *c = base ? [NSColor colorWithSRGBRed:1.0 green:0.624 blue:0.04 alpha:1] : C_OK();
+        NSColor *c = base ? NSColor.systemOrangeColor : NSColor.systemGreenColor;
         NSBezierPath *p = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(x - 8, y - 8, 16, 16)];
         p.lineWidth = 2;
         [c setStroke];
@@ -271,7 +335,7 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)s {
     NSArray<NSURL *> *urls =
         [s.draggingPasteboard readObjectsForClasses:@[ NSURL.class ]
-                                           options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
+                                           options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @(YES) }];
     if (!urls.count) return NO;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"NegLabOpenURL" object:urls.firstObject];
     return YES;
@@ -280,17 +344,49 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
 
 // ═══════════════════════════════════════════════ 主控制器
 
-@interface NegApp : NSObject <NSApplicationDelegate>
+@interface NegApp : NSObject <NSApplicationDelegate, NSToolbarDelegate>
+@end
+
+// ── 根视图：用「框架布局」而不是 Auto Layout 摆放四大块 ────────────────────
+// 为什么不全程用 Auto Layout：窗口的尺寸和内容的尺寸互为因果时，AppKit 会拿内容
+// 的拟合尺寸去定窗口，而且 contentMinSize / setContentSize: / setFrame: 全部拦不住
+// （这台机器上实测窗口被钉成 691 × 754，画布只剩 303 pt 宽，连冲突日志都不打）。
+// 顶层这四块用框架布局就没有这个问题：窗口尺寸是**因**，各块的位置是**果**。
+// 侧栏内部仍然用 Auto Layout —— 它的宽度是固定的，不会反过来影响窗口。
+@interface NegRoot : NSView
+@property (nonatomic, weak) NSView *canvas, *status, *hair, *side;
+@end
+
+@implementation NegRoot
+- (void)layout {
+    [super layout];
+    CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds);
+    if (W < 10 || H < 10) return;
+
+    self.side.frame = NSMakeRect(W - PANEL_W, 0, PANEL_W, H);
+    self.hair.frame = NSMakeRect(W - PANEL_W - 1, 0, 1, H);
+
+    CGFloat pad = 18, statusH = 16;
+    CGFloat cw = W - PANEL_W - 1 - pad * 2;
+    if (cw < 80) cw = 80;
+    CGFloat cy = 16 + statusH + 10;
+    self.status.frame = NSMakeRect(pad, 16, cw, statusH);
+    CGFloat ch = H - cy - pad;
+    if (ch < 80) ch = 80;
+    self.canvas.frame = NSMakeRect(pad, cy, cw, ch);
+}
 @end
 
 @implementation NegApp {
     NSWindow *_win;
     NegCanvas *_canvas;
-    NSTextField *_lblFile, *_lblStatus, *_lblSteps;
-    NSSegmentedControl *_segView, *_segZero;
+    NSTextField *_lblFile, *_lblFileMeta, *_lblStatus;
     NSTextField *_lblT0, *_lblFit, *_lblHealth;
+    NegCard *_cardZero, *_cardGamma, *_cardOut;
+    NSSegmentedControl *_segView, *_segZero;
     NSButton *_btnGrey, *_btnUndo, *_btnClearCal;
     NegSliderRow *_slGammaR, *_slGammaB, *_slExposure, *_slBlack;
+    NSScrollView *_sidebar;
     NSWindow *_guide;
 
     NegFrame     _full, _proxy;
@@ -373,45 +469,48 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
     [a runModal];
 }
 
-// ── 搭侧栏 ─────────────────────────────────────────────────────────────────
-- (NSView *)buildSidebar {
-    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, PANEL_W, 100)];
-    v.translatesAutoresizingMaskIntoConstraints = NO;
-    v.wantsLayer = YES;
-    v.layer.backgroundColor = C_BG().CGColor;
+// ── 检查器（右侧） ─────────────────────────────────────────────────────────
+// 用 NSScrollView 包住：窗口高度不够时内容可以滚动，而不是被裁掉。
+// 上一版没有滚动视图，窗口一矮下面的卡片就直接看不见了。
+- (NSScrollView *)buildSidebar {
+    // ── 文件 ──
+    _lblFile = mkLabel1(@"尚未打开文件", F_BODY(), C_INK());
+    _lblFile.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _lblFileMeta = mkHelp(@"拖入窗口，或按 ⌘O。店家扫的 TIFF、你翻拍的相机 raw 都能读。");
+    NegCard *cardFile = mkCard(@"文件", @[_lblFile, _lblFileMeta]);
 
-    _lblSteps = mkLabel(@"", 11.5, C_MUT(), YES);
-    _lblSteps.alignment = NSTextAlignmentCenter;
-
-    // 卡片①：零点
+    // ── ① 零点 ──
     _segZero = [NSSegmentedControl segmentedControlWithLabels:@[ @"自动", @"手动点选" ]
                                                  trackingMode:NSSegmentSwitchTrackingSelectOne
                                                        target:self action:@selector(zeroModeChanged:)];
     _segZero.selectedSegment = 0;
-    _segZero.controlSize = NSControlSizeSmall;
-    _segZero.font = [NSFont systemFontOfSize:11.5];
+    _segZero.controlSize = NSControlSizeRegular;
     _segZero.segmentDistribution = NSSegmentDistributionFillEqually;
 
-    NSButton *btnBase = mkButton(@"在图上点片基", self, @selector(armBase:));
-    btnBase.controlSize = NSControlSizeSmall;
-    btnBase.font = [NSFont systemFontOfSize:11.5];
+    NSButton *btnBase = mkSymbolButton(@"scope", @"在图上点片基", self, @selector(armBase:));
+    _lblT0 = mkLabel1(@"T0 —", F_VALUE(), C_MUT());
+    _lblT0.lineBreakMode = NSLineBreakByTruncatingTail;
 
-    _lblT0 = mkMono(@"T0 —", 10.5, C_MUT());
-    NSView *cardZero = mkCard(@"① 零点 T0　每帧都要重定",
-                              @[_segZero, btnBase, _lblT0,
-                                mkLabel(@"负片上「密度为零」的透过率，就是未曝光的片基。"
-                                        @"点它最准；自动取画面最亮 0.05%，画面里有强光会偏。",
-                                        10.5, C_MUT(), NO)]);
+    NegCard *cardZero = mkCard(@"① 零点　每帧都要重定",
+        @[_segZero, btnBase, _lblT0,
+          mkHelp(@"零点 = 未曝光片基的透过率。有片基就点它，最准；自动估计会被画面里的强光带偏。")]);
 
-    // 卡片②：斜率
-    _btnGrey = mkButton(@"点中性灰（0 块）", self, @selector(armGrey:));
+    // ── ② 斜率 γ ──
+    _btnGrey = mkSymbolButton(@"eyedropper", @"点中性灰（0 块）", self, @selector(armGrey:));
     _btnUndo = mkButton(@"撤销", self, @selector(undoGrey:));
     NSButton *btnFit = mkButton(@"解算 γ", self, @selector(doFit:));
-    for (NSButton *b in @[_btnGrey, _btnUndo, btnFit]) {
-        b.controlSize = NSControlSizeSmall;
-        b.font = [NSFont systemFontOfSize:11.5];
-    }
-    NSStackView *rowGrey = hstack(@[_btnGrey, _btnUndo, btnFit], 6);
+    btnFit.keyEquivalent = @"\r";
+    NSButton *btnSaveCal = mkButton(@"存标定…", self, @selector(saveCal:));
+    NSButton *btnLoadCal = mkButton(@"载入…", self, @selector(loadCal:));
+    _btnClearCal = mkButton(@"清空取样", self, @selector(clearAll:));
+    NSButton *btnHow = mkButton(@"怎么做", self, @selector(howToCalibrate:));
+
+    NSStackView *rowGrey = hstack(@[_btnGrey, _btnUndo], 8);
+    [rowGrey setDistribution:NSStackViewDistributionFillEqually];
+    NSStackView *rowFit = hstack(@[btnFit, btnHow], 8);
+    [rowFit setDistribution:NSStackViewDistributionFillEqually];
+    NSStackView *rowCal = hstack(@[btnSaveCal, btnLoadCal], 8);
+    [rowCal setDistribution:NSStackViewDistributionFillEqually];
 
     _slGammaR = [[NegSliderRow alloc] initWithTitle:@"γ 红" lo:0.3 hi:3.0 val:1.0 fmt:@"%.3f"];
     _slGammaB = [[NegSliderRow alloc] initWithTitle:@"γ 蓝" lo:0.3 hi:3.0 val:1.0 fmt:@"%.3f"];
@@ -419,131 +518,176 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
         r.slider.target = self;
         r.slider.action = @selector(manualGammaChanged:);
     }
-    _lblFit = mkLabel(@"尚未标定。没有 γ 也能看，只是三通道会差好几档。", 10.5, C_MUT(), NO);
+    _lblFit = mkHelp(@"尚未标定。没有 γ 也能看，只是三个通道的斜率对不齐，会留下明显偏色。");
 
-    NSButton *btnSaveCal = mkButton(@"存标定", self, @selector(saveCal:));
-    NSButton *btnLoadCal = mkButton(@"载入", self, @selector(loadCal:));
-    NSButton *btnHow = mkButton(@"怎么办", self, @selector(howToCalibrate:));
-    _btnClearCal = mkButton(@"清空", self, @selector(clearAll:));
-    for (NSButton *b in @[btnSaveCal, btnLoadCal, btnHow, _btnClearCal]) {
-        b.controlSize = NSControlSizeSmall;
-        b.font = [NSFont systemFontOfSize:11.5];
-    }
-    NSStackView *rowCal = hstack(@[btnSaveCal, btnLoadCal, btnHow, _btnClearCal], 6);
+    NegCard *cardGamma = mkCard(@"② 斜率 γ 与偏移　一个型号定一次",
+        @[rowGrey, rowFit, _slGammaR, _slGammaB, _lblFit, _btnClearCal, rowCal]);
 
-    NSView *cardGamma = mkCard(@"② 斜率 γ 与偏移　一个「型号 × 链路」定一次",
-                               @[rowGrey, _slGammaR, _slGammaB, _lblFit, rowCal]);
-
-    // 卡片③：输出
+    // ── ③ 输出 ──
     _slExposure = [[NegSliderRow alloc] initWithTitle:@"曝光" lo:-2 hi:2 val:0 fmt:@"%+.2f"];
     _slBlack    = [[NegSliderRow alloc] initWithTitle:@"黑点" lo:0 hi:0.05 val:0 fmt:@"%.4f"];
     for (NegSliderRow *r in @[_slExposure, _slBlack]) {
         r.slider.target = self;
         r.slider.action = @selector(outputChanged:);
     }
-    _lblHealth = mkLabel(@"", 10.5, C_MUT(), NO);
-    NSView *cardOut = mkCard(@"③ 输出　只改明暗，不改中性", @[_slExposure, _slBlack, _lblHealth]);
+    _lblHealth = mkHelp(@"");
+    NegCard *cardOut = mkCard(@"③ 输出　只改明暗，不改中性",
+        @[_slExposure, _slBlack, _lblHealth]);
 
-    // 底部
-    NSButton *btnOpen = mkButton(@"打开…", self, @selector(openDoc:));
-    NSButton *btnExport = mkButton(@"导出…", self, @selector(exportDoc:));
-    NSButton *btnGuide = mkButton(@"说明", self, @selector(showGuide:));
-    NSStackView *rowBottom = hstack(@[btnOpen, btnExport, btnGuide], 8);
-    [rowBottom setDistribution:NSStackViewDistributionFillEqually];
+    // ── 组装 ──
+    NSStackView *stack = vstack(@[cardFile, cardZero, cardGamma, cardOut], GAP_CARD);
+    stack.edgeInsets = NSEdgeInsetsMake(PAD_SIDE, PAD_SIDE, PAD_SIDE, PAD_SIDE);
 
-    _lblStatus = mkLabel(@"把负片拖进来，或按 ⌘O。", 10.5, C_MUT(), NO);
+    NSView *inner = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, PANEL_W, 600)];
+    inner.translatesAutoresizingMaskIntoConstraints = NO;
+    [inner addSubview:stack];
 
-    NSStackView *stack = vstack(@[_lblSteps, cardZero, cardGamma, cardOut, rowBottom, _lblStatus], 12);
-    stack.edgeInsets = NSEdgeInsetsMake(14, 13, 14, 13);
-    [v addSubview:stack];
+    NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, PANEL_W, 600)];
+    sv.translatesAutoresizingMaskIntoConstraints = NO;
+    sv.hasVerticalScroller = YES;
+    sv.hasHorizontalScroller = NO;
+    sv.autohidesScrollers = YES;
+    sv.drawsBackground = NO;
+    sv.documentView = inner;
+    sv.contentView.drawsBackground = NO;
+
     [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
-        [stack.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
-        [stack.topAnchor constraintEqualToAnchor:v.topAnchor],
+        [stack.topAnchor      constraintEqualToAnchor:inner.topAnchor],
+        [stack.bottomAnchor   constraintEqualToAnchor:inner.bottomAnchor],
+        [stack.leadingAnchor  constraintEqualToAnchor:inner.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:inner.trailingAnchor],
+        // ★ 用固定宽度，别用「等于滚动视图裁剪区宽度」。
+        //   把 documentView 的宽度和 clipView 绑在一起，会让滚动视图去参与整个窗口的
+        //   尺寸推导，结果是窗口被自己缩到最小（实测 691 宽），而且画布上的宽度下限
+        //   被无声地破掉、还不会打冲突日志。
+        [inner.widthAnchor    constraintEqualToConstant:PANEL_W],
     ]];
-    return v;
+
+    _cardZero = cardZero; _cardGamma = cardGamma; _cardOut = cardOut;
+    _sidebar = sv;
+    return sv;
 }
 
-// ── 搭主窗 ─────────────────────────────────────────────────────────────────
+// ── 主窗 ───────────────────────────────────────────────────────────────────
 - (void)buildWindow {
-    _win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1200, 800)
+    _win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1240, 820)
                                        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
                                          backing:NSBackingStoreBuffered defer:NO];
     _win.title = @"NegLab";
-    _win.minSize = NSMakeSize(940, 640);
-    _win.backgroundColor = C_BG();
+    _win.backgroundColor = NSColor.windowBackgroundColor;
+    // ★ 关掉状态恢复。macOS 会把窗口尺寸另存进 ~/Library/Saved Application State/，
+    //   那和 NSUserDefaults 是两个独立存储 —— 只删 defaults 是清不掉的。
+    _win.restorable = NO;
     [_win center];
     [_win setFrameAutosaveName:@"NegLabMainWindow"];
 
-    NSView *root = _win.contentView;
+    NegRoot *root = [[NegRoot alloc] initWithFrame:NSMakeRect(0, 0, 1240, 800)];
+    _win.contentView = root;
 
-    _lblFile = mkLabel(@"未打开文件", 12.5, C_INK(), YES);
-    _lblFile.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    _lblFile.usesSingleLineMode = YES;
-
-    _segView = [NSSegmentedControl segmentedControlWithLabels:@[ @"原始负片", @"结果" ]
-                                                 trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                       target:self action:@selector(viewChanged:)];
-    _segView.selectedSegment = 1;
-    _segView.controlSize = NSControlSizeSmall;
-    _segView.font = [NSFont systemFontOfSize:11.5];
-
-    NSView *topBar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 40)];
-    topBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _lblFile.translatesAutoresizingMaskIntoConstraints = NO;
-    _segView.translatesAutoresizingMaskIntoConstraints = NO;
-    [topBar addSubview:_lblFile];
-    [topBar addSubview:_segView];
-    [NSLayoutConstraint activateConstraints:@[
-        [_lblFile.leadingAnchor constraintEqualToAnchor:topBar.leadingAnchor constant:16],
-        [_lblFile.centerYAnchor constraintEqualToAnchor:topBar.centerYAnchor],
-        [_lblFile.trailingAnchor constraintLessThanOrEqualToAnchor:_segView.leadingAnchor constant:-12],
-        [_segView.trailingAnchor constraintEqualToAnchor:topBar.trailingAnchor constant:-16],
-        [_segView.centerYAnchor constraintEqualToAnchor:topBar.centerYAnchor],
-    ]];
-
+    // 画布
     _canvas = [[NegCanvas alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
     _canvas.translatesAutoresizingMaskIntoConstraints = NO;
     __weak NegApp *ws = self;
     _canvas.onSample = ^(double nx, double ny) { [ws handleClickX:nx y:ny]; };
 
-    NSView *left = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
-    left.translatesAutoresizingMaskIntoConstraints = NO;
-    [left addSubview:topBar];
-    [left addSubview:_canvas];
+    // 检查器
+    NSScrollView *side = [self buildSidebar];
 
-    NSView *side = [self buildSidebar];
+    // 分隔线（AppKit 的标准做法：1pt 的 separatorColor）
+    NSView *hair = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1, 100)];
+    hair.translatesAutoresizingMaskIntoConstraints = NO;
+    hair.wantsLayer = YES;
+    hair.layer.backgroundColor = C_HAIR().CGColor;
 
-    [root addSubview:left];
+    // 状态行：当前该做什么、刚做了什么。放在画布正下方，不抢视线但一直在。
+    //
+    // ★★ 这里必须是**单行**，不能自动折行。否则会形成一个循环依赖：
+    //     状态行的宽度 ← 画布宽度；画布的高度 ← 状态行的行数 ← 状态行的宽度。
+    //    Auto Layout 解不开这种环，只会挑一个退化解 —— 表现为整个窗口被钉在
+    //    「刚好装下这行字」的宽度（实测 691 × 754），而且画布上的宽度下限会被
+    //    无声地破掉、连冲突日志都不打。这个坑查了很久，记在这里。
+    _lblStatus = mkLabel1(@"把负片拖进窗口，或按 ⌘O。扫描件与相机 raw 都能读。",
+                          F_SMALL(), C_MUT());
+    _lblStatus.lineBreakMode = NSLineBreakByTruncatingTail;
+    _lblStatus.toolTip = _lblStatus.stringValue;
+
+    [root addSubview:_canvas];
+    [root addSubview:_lblStatus];
+    [root addSubview:hair];
     [root addSubview:side];
-    [NSLayoutConstraint activateConstraints:@[
-        [left.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
-        [left.topAnchor constraintEqualToAnchor:root.topAnchor],
-        [left.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
-        [left.trailingAnchor constraintEqualToAnchor:side.leadingAnchor],
 
-        [side.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [side.topAnchor constraintEqualToAnchor:root.topAnchor],
-        [side.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
-        [side.widthAnchor constraintEqualToConstant:PANEL_W],
+    // 视图模式：原始负片 / 结果。放进工具栏右侧，跟系统里的预览、照片一个位置。
+    _segView = [NSSegmentedControl segmentedControlWithLabels:@[ @"原始负片", @"结果" ]
+                                                 trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                       target:self action:@selector(viewChanged:)];
+    _segView.selectedSegment = 1;
+    _segView.controlSize = NSControlSizeRegular;
+    _segView.segmentDistribution = NSSegmentDistributionFillEqually;
+    [_segView.widthAnchor constraintEqualToConstant:176].active = YES;
 
-        [topBar.leadingAnchor constraintEqualToAnchor:left.leadingAnchor],
-        [topBar.trailingAnchor constraintEqualToAnchor:left.trailingAnchor],
-        [topBar.topAnchor constraintEqualToAnchor:left.topAnchor],
-        [topBar.heightAnchor constraintEqualToConstant:40],
-
-        [_canvas.leadingAnchor constraintEqualToAnchor:left.leadingAnchor constant:14],
-        [_canvas.trailingAnchor constraintEqualToAnchor:left.trailingAnchor constant:-14],
-        [_canvas.topAnchor constraintEqualToAnchor:topBar.bottomAnchor constant:2],
-        [_canvas.bottomAnchor constraintEqualToAnchor:left.bottomAnchor constant:-14],
-    ]];
+    // ── 工具栏：动作放这里，跟系统里的预览、照片一个位置 ──
+    NSToolbar *tb = [[NSToolbar alloc] initWithIdentifier:@"dev.neglab.toolbar"];
+    tb.delegate = self;
+    tb.allowsUserCustomization = NO;
+    tb.displayMode = NSToolbarDisplayModeIconOnly;
+    if (@available(macOS 11.0, *)) _win.toolbarStyle = NSWindowToolbarStyleUnified;
+    _win.toolbar = tb;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(openURLNote:)
                                                  name:@"NegLabOpenURL" object:nil];
 
+    // 四块交给 NegRoot 的 -layout 摆，这里只登记引用
+    root.canvas = _canvas;
+    root.status = _lblStatus;
+    root.hair   = hair;
+    root.side   = side;
+
+    _win.contentMinSize = NSMakeSize(960, 640);
+    [_win setContentSize:NSMakeSize(1240, 800)];
+    [_win center];
     [_win makeKeyAndOrderFront:nil];
     [self refreshEnabled];
+}
+
+// ── 工具栏 ─────────────────────────────────────────────────────────────────
+static NSString *const TB_OPEN  = @"open";
+static NSString *const TB_EXPORT= @"export";
+static NSString *const TB_VIEW  = @"view";
+static NSString *const TB_HELP  = @"help";
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb {
+    return @[ TB_OPEN, TB_EXPORT, NSToolbarFlexibleSpaceItemIdentifier, TB_VIEW, TB_HELP ];
+}
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb {
+    return @[ TB_OPEN, TB_EXPORT, NSToolbarFlexibleSpaceItemIdentifier, TB_VIEW, TB_HELP ];
+}
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)tb itemForItemIdentifier:(NSToolbarItemIdentifier)ident
+     willBeInsertedIntoToolbar:(BOOL)flag {
+    NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
+    if ([ident isEqualToString:TB_OPEN]) {
+        it.label = @"打开";
+        it.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:@"打开"];
+        it.target = self;
+        it.action = @selector(openDoc:);
+    } else if ([ident isEqualToString:TB_EXPORT]) {
+        it.label = @"导出";
+        it.image = [NSImage imageWithSystemSymbolName:@"square.and.arrow.up"
+                             accessibilityDescription:@"导出"];
+        it.target = self;
+        it.action = @selector(exportDoc:);
+    } else if ([ident isEqualToString:TB_HELP]) {
+        it.label = @"使用说明";
+        it.image = [NSImage imageWithSystemSymbolName:@"questionmark.circle"
+                             accessibilityDescription:@"使用说明"];
+        it.target = self;
+        it.action = @selector(showGuide:);
+    } else if ([ident isEqualToString:TB_VIEW]) {
+        it.label = @"显示";
+        it.view = _segView;
+    }
+    return it;
 }
 
 - (void)openURLNote:(NSNotification *)n {
@@ -565,8 +709,8 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
     if (!path.length || _loading) return;
     _loading = YES;
     _lblFile.stringValue = [NSString stringWithFormat:@"正在读 %@ …", path.lastPathComponent];
+    _lblFileMeta.stringValue = @"正在解码，请稍候。";
     [self setStatus:@"正在解码。45 MB 的 TIFF 大约要一两秒。"];
-    [_win setTitle:[NSString stringWithFormat:@"NegLab — %@", path.lastPathComponent]];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         // 块里不能引用 C 数组，所以在这一层就把它们变成 NSString
@@ -610,9 +754,14 @@ static NSView *mkCard(NSString *title, NSArray<NSView *> *rows) {
             self->_canvas.picking = NO;
             self->_currentPath = path;
             self->_segZero.selectedSegment = 0;
-            self->_lblFile.stringValue = [NSString stringWithFormat:@"%@　%zu×%zu　%@",
-                                          path.lastPathComponent, f.w, f.h, encStr];
-            [self setStatus:@"① 先把零点定下来。画面里有未曝光的片基就点它，最准。"];
+            self->_lblFile.stringValue = path.lastPathComponent;
+            NSNumber *sz = [[NSFileManager defaultManager]
+                            attributesOfItemAtPath:path error:nil][NSFileSize];
+            self->_lblFileMeta.stringValue = [NSString stringWithFormat:
+                @"%zu × %zu 像素　%.1f MB\n%@", f.w, f.h,
+                sz ? sz.doubleValue / 1e6 : 0.0, encStr];
+            [_win setTitle:path.lastPathComponent];
+            [self setStatus:@"先把零点定下来。画面里有未曝光的片基就点它，最准。"];
             [self renderViews];
             if (self->_pendingCalib) {
                 NSURL *u = self->_pendingCalib;
@@ -967,8 +1116,14 @@ static const double DISP_PCT = 99.9;
 }
 
 // ── 状态与步骤 ─────────────────────────────────────────────────────────────
-- (void)setStatus:(NSString *)s { _lblStatus.stringValue = s ?: @""; }
+- (void)setStatus:(NSString *)s {
+    _lblStatus.stringValue = s ?: @"";
+    _lblStatus.toolTip = s;
+}
 
+// 卡片标题兼作步骤指示：走到哪一步就把那张卡的标题染成强调色，已完成的转为常规色。
+// 上一版是在侧栏顶上加一行「① 打开 ✓ ② 定零点 → ③ 解 γ → ④ 导出」，中文挤成两行；
+// 现在把状态放回它本来该在的位置 —— 卡片自己身上。
 - (void)refreshEnabled {
     BOOL has = (_proxy.rgb != NULL);
     _btnGrey.enabled = has;
@@ -981,25 +1136,13 @@ static const double DISP_PCT = 99.9;
     if (has && (_haveBase || _segZero.selectedSegment == 0)) step = 2;
     if (_greys.count >= 2 && fabs(_gamma[0] - 1.0) > 1e-9) step = 3;
 
-    NSArray *names = @[ @"① 打开", @"② 定零点", @"③ 解 γ", @"④ 导出" ];
-    NSMutableAttributedString *m = [NSMutableAttributedString new];
-    for (NSUInteger i = 0; i < names.count; i++) {
-        NSColor *c = (i == (NSUInteger)step) ? C_ACC()
-                                             : ((i < (NSUInteger)step) ? C_OK() : C_MUT());
-        NSDictionary *a = @{
-            NSFontAttributeName: [NSFont systemFontOfSize:11.5
-                                                   weight:(i == (NSUInteger)step
-                                                               ? NSFontWeightSemibold
-                                                               : NSFontWeightRegular)],
-            NSForegroundColorAttributeName: c };
-        [m appendAttributedString:[[NSAttributedString alloc] initWithString:names[i]
-                                                                 attributes:a]];
-        if (i + 1 < names.count)
-            [m appendAttributedString:[[NSAttributedString alloc]
-                initWithString:(i < (NSUInteger)step ? @"  ✓  " : @"  →  ")
-                    attributes:@{ NSForegroundColorAttributeName: C_LINE() }]];
+    NSArray<NegCard *> *cards = @[ _cardZero, _cardGamma, _cardOut ];
+    for (NSUInteger i = 0; i < cards.count; i++) {
+        int cardStep = (int)i + 1;
+        NSColor *c = (cardStep == step) ? C_ACCENT()
+                                       : (cardStep < step ? C_MUT() : C_FAINT());
+        cards[i].titleLabel.textColor = c;
     }
-    _lblSteps.attributedStringValue = m;
 }
 
 // ── 导出 ───────────────────────────────────────────────────────────────────
@@ -1013,7 +1156,7 @@ static const double DISP_PCT = 99.9;
     [fmt addItemsWithTitles:@[ @"16-bit 线性 TIFF（留给自己调色）",
                                @"8-bit JPEG（直接看）",
                                @"8-bit PNG（直接看）" ]];
-    NSStackView *acc = hstack(@[ mkLabel(@"格式", 12, C_INK(), NO), fmt ], 10);
+    NSStackView *acc = hstack(@[ mkLabel1(@"格式", F_BODY(), C_INK()), fmt ], 10);
     acc.frame = NSMakeRect(0, 0, 340, 44);
     acc.edgeInsets = NSEdgeInsetsMake(8, 16, 8, 16);
     p.accessoryView = acc;
@@ -1059,7 +1202,7 @@ static const double DISP_PCT = 99.9;
                                                backing:NSBackingStoreBuffered defer:NO];
         _guide.releasedWhenClosed = NO;
         _guide.title = @"NegLab 使用说明";
-        _guide.backgroundColor = C_CARD();
+        _guide.backgroundColor = NSColor.windowBackgroundColor;
 
         NSTextView *tv = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 540)];
         tv.editable = NO;

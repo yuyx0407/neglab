@@ -76,9 +76,11 @@ int main(int argc, const char **argv) {
         if (argc >= 5 && !strcmp(argv[1], "--render")) {
             const char *inPath = argv[2], *calPath = argv[3], *outPath = argv[4];
             double ev = 0.0, black = 0.0;
+            double baseX = -1, baseY = -1;
             for (int i = 5; i + 1 < argc; i += 2) {
                 if (!strcmp(argv[i], "--ev")) ev = atof(argv[i + 1]);
                 else if (!strcmp(argv[i], "--black")) black = atof(argv[i + 1]);
+                else if (!strcmp(argv[i], "--base")) sscanf(argv[i + 1], "%lf,%lf", &baseX, &baseY);
             }
             double gamma[3], offset[3], lRef;
             if (loadCalib(calPath, gamma, offset, &lRef) != 0) {
@@ -91,8 +93,19 @@ int main(int argc, const char **argv) {
                 printf("✗ 读不了负片：%s\n", err);
                 return 1;
             }
+            // 零点每帧重定。给了 --base 就手点片基（推荐），否则自动估计。
+            // 相机翻拍且灯箱外露的片子里，自动估计会落到灯箱上 —— 那是最常见的翻车点。
             double t0[3];
-            negEstimateZero(f.rgb, f.w, f.h, 0.0005, t0);   // 零点每帧重定
+            if (baseX >= 0 && baseY >= 0) {
+                negSamplePatch(&f, baseX, baseY, 12, t0);
+                for (int c = 0; c < 3; c++) if (t0[c] < 1e-6) t0[c] = 1e-6;
+                printf("   零点：手动点选 (%.3f, %.3f) → T0 = %.5f %.5f %.5f\n",
+                       baseX, baseY, t0[0], t0[1], t0[2]);
+            } else {
+                negEstimateZero(f.rgb, f.w, f.h, 0.0005, t0);
+                printf("   零点：自动（最亮 0.05%%）→ T0 = %.5f %.5f %.5f\n",
+                       t0[0], t0[1], t0[2]);
+            }
             size_t n = f.w * f.h;
             negInvert(f.rgb, n, t0, gamma, offset, lRef,
                       pow(2.0, ev), black, NEG_PI_CLIP_DEFAULT);
@@ -118,7 +131,7 @@ int main(int argc, const char **argv) {
                    "  calib_cli --selftest\n"
                    "  calib_cli <负片> <半径> \"x1,y1;x2,y2;...\"\n"
                    "  calib_cli --render <负片> <标定.json> <输出.tif|.jpg|.png> "
-                   "[--ev X] [--black Y]\n");
+                   "[--ev X] [--black Y] [--base x,y]\n");
             return 2;
         }
         NegFrame f;

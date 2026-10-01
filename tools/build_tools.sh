@@ -22,7 +22,7 @@ clang $CFLAGS -fobjc-arc -Wno-deprecated-declarations $FRAMEWORKS \
 
 echo "④ raw2linear —— 相机 raw → 16-bit 线性 TIFF"
 clang $CFLAGS -fobjc-arc -Wno-deprecated-declarations $FRAMEWORKS \
-  -o raw2linear raw2linear.m
+  -o raw2linear raw2linear.m ../app/NegImage.m ../app/NegMath.m
 
 echo
 echo "════── 跑一遍自检 ──════"
