@@ -1084,19 +1084,25 @@ static const double DISP_PCT = 99.9;
     float *o = malloc(sizeof(float) * n * 3);
     if (!o) return;
 
-    memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
-    float hiO = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT);
-    _imgOriginal = [self imageFromRGBA:negRGBA8(o, _proxy.w, _proxy.h,
-                                                hiO > 1e-6f ? hiO : 1e-6f)];
+    // 「原始负片」只跟像素有关，与任何滑杆无关 —— 只在真的要看它时才算。
+    // 拖滑杆时视图通常在「结果」上，这一支白白占了将近一半的开销。
+    if (_segView.selectedSegment == 0) {
+        memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
+        float hiO = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT);
+        _imgOriginal = [self imageFromRGBA:negRGBA8(o, _proxy.w, _proxy.h,
+                                                    hiO > 1e-6f ? hiO : 1e-6f)];
+    }
 
     double t0[3];
     [self curT0:t0];
     memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
     double off2[3]; [self effOffset:off2];
-    negInvert(o, n, t0, _gamma, off2, _lRef,
-              pow(2.0, _slExposure.slider.doubleValue),
-              0.0, NEG_PI_CLIP_DEFAULT);
-    float hiR = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT);
+    negInvert(o, n, t0, _gamma, off2, _lRef, 1.0, 0.0, NEG_PI_CLIP_DEFAULT);
+    // ★ 曝光必须作用在**白点之后**。白点取的是画面自己的百分位，
+    //   在它之前乘一个整体系数会被下一次归一化精确抵消 —— 这就是「曝光调不动」的根因。
+    //   物理上也对：曝光是印片机的曝光，作用在相纸上，不作用在负片上。
+    float gain = pow(2.0, _slExposure.slider.doubleValue);
+    float hiR = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT) / gain;
     _imgResult = [self imageFromRGBA:negRGBA8(o, _proxy.w, _proxy.h,
                                               hiR > 1e-6f ? hiR : 1e-6f)];
     free(o);
@@ -1231,18 +1237,17 @@ static const double DISP_PCT = 99.9;
     [self curT0:t0];
     memcpy(o, _full.rgb, sizeof(float) * n * 3);
     double off2[3]; [self effOffset:off2];
-    negInvert(o, n, t0, _gamma, off2, _lRef,
-              pow(2.0, _slExposure.slider.doubleValue),
-              0.0, NEG_PI_CLIP_DEFAULT);
+    negInvert(o, n, t0, _gamma, off2, _lRef, 1.0, 0.0, NEG_PI_CLIP_DEFAULT);
+    double gain = pow(2.0, _slExposure.slider.doubleValue);
 
     char err[256] = {0};
     int r;
     if (k == 0) {
-        float hi = negGreenPercentile(o, _full.w, _full.h, DISP_PCT);
+        float hi = negGreenPercentile(o, _full.w, _full.h, DISP_PCT) / (float)gain;
         r = negSaveLinearTIFF(url.path.UTF8String, o, _full.w, _full.h,
                               hi > 1e-6f ? hi : 1e-6f, err, sizeof(err));
     } else {
-        float hi = negGreenPercentile(o, _full.w, _full.h, DISP_PCT);
+        float hi = negGreenPercentile(o, _full.w, _full.h, DISP_PCT) / (float)gain;
         r = negSaveDisplay8(url.path.UTF8String, o, _full.w, _full.h,
                             hi > 1e-6f ? hi : 1e-6f, err, sizeof(err));
     }
