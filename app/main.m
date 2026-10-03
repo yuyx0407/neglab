@@ -499,8 +499,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     _segZero.segmentDistribution = NSSegmentDistributionFillEqually;
 
     NSButton *btnBase = mkSymbolButton(@"scope", @"在图上点片基", self, @selector(armBase:));
-    _lblT0 = mkLabel1(@"T0 —", F_VALUE(), C_MUT());
-    _lblT0.lineBreakMode = NSLineBreakByTruncatingTail;
+    _lblT0 = mkLabel(@"T0 —", F_VALUE(), C_MUT());   // 可换行：三通道数值一行放不下
 
     _chkLock = [NSButton checkboxWithTitle:@"锁住，供同一批的其余帧共用" target:self
                                     action:@selector(lockToggled:)];
@@ -552,7 +551,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
         r.slider.action = @selector(outputChanged:);
     }
     _lblHealth = mkHelp(@"");
-    NegCard *cardOut = mkCard(@"③ 输出　只改明暗，不改中性",
+    NegCard *cardOut = mkCard(@"③ 输出　Y/M/C = 印片机滤色片（CC）",
         @[_slExposure, _slY, _slM, _slC, _lblHealth]);
 
     // ── 组装 ──
@@ -583,6 +582,11 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
         //   被无声地破掉、还不会打冲突日志。
         [inner.widthAnchor    constraintEqualToConstant:PANEL_W],
     ]];
+
+    // ★ 卡片宽度必须钉死。只靠 stack 的 alignment = Width 时，各卡的宽度会退化成
+    //   各自内容的固有宽度，结果右边缘勉强对齐、左边缘参差（实测三张卡左边缘差 200pt）。
+    for (NSView *v in @[cardFile, cardZero, cardGamma, cardOut])
+        [v.widthAnchor constraintEqualToConstant:PANEL_W - 2 * PAD_SIDE].active = YES;
 
     _cardZero = cardZero; _cardGamma = cardGamma; _cardOut = cardOut;
     _sidebar = sv;
@@ -1143,7 +1147,7 @@ static const double DISP_PCT = 99.9;
     if (!_proxy.rgb) return;
     NSString *src = _hasLockedT0 ? @"锁定值"
                   : (_haveBase ? @"手动点选" : @"画面最亮 0.05%");
-    _lblT0.stringValue = [NSString stringWithFormat:@"T0 = %.5f  %.5f  %.5f　%@",
+    _lblT0.stringValue = [NSString stringWithFormat:@"T0 = %.4f  %.4f  %.4f　%@",
                           t0[0], t0[1], t0[2], src];
 
     // 输入体检：抽样统计唯一取值数 + 撞密度上限的像素比例
