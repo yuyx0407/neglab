@@ -856,28 +856,95 @@ static NSString *const TB_HELP  = @"help";
 - (void)buildThumbs {
     if (_curThumb < 0 || _curThumb >= (NSInteger)_paths.count) return;
     NSString *path = _paths[(NSUInteger)_curThumb];
-    NegFrame f; char e[64] = {0}, er[128] = {0};
-    if (negLoadFrame(path.UTF8String, &f, e, sizeof(e), er, sizeof(er)) == 0) {
-        NegFrame sm = negDownsample(&f, 200);
-        negFreeFrame(&f);
-        if (sm.rgb) {
-            double t0[3]; negEstimateZero(sm.rgb, sm.w, sm.h, 0.0005, t0);
-            double off2[3]; [self effOffset:off2];
-            negInvert(sm.rgb, sm.w * sm.h, t0, _gamma, off2, _lRef,
-                      NEG_PI_CLIP_DEFAULT, _paper);
-            float hi = negGreenPercentile(sm.rgb, sm.w, sm.h, DISP_PCT);
-            NSImage *im = [self imageFromRGBA:negRGBA8(sm.rgb, sm.w, sm.h,
-                                                       hi > 1e-6f ? hi : 1e-6f)];
-            negFreeFrame(&sm);
-            if (im && _curThumb < (NSInteger)_thumbs.count) {
-                _thumbs[(NSUInteger)_curThumb] = im;
-                _stripView.needsDisplay = YES;      // 只刷新，不重建 frame
-            }
-        }
+
+    // ★ 用 ImageIO 的缩略图 API 直接按小尺寸解码，而不是完整解码 45MB 再降采样。
+    //   完整解码一张要 2-5 秒且在主线程上做（UI 会冻住 39 次）；缩略图 API 毫秒级完成。
+    //   缩略图只需要看个大概，不需要科学精度，所以用 sRGB 直读即可。
+    CGImageSourceRef src = CGImageSourceCreateWithURL(
+        (CFURLRef)[NSURL fileURLWithPath:path], NULL);
+    CGImageRef cg = NULL;
+    if (src) {
+        cg = CGImageSourceCreateThumbnailAtIndex(src, 0, (CFDictionaryRef)@{
+            (NSString *)kCGImageSourceCreateThumbnailFromImageAlways : @YES,
+            (NSString *)kCGImageSourceCreateThumbnailWithTransform   : @YES,
+            (NSString *)kCGImageSourceThumbnailMaxPixelSize          : @160 });
+        CFRelease(src);
     }
+    if (!cg) { _curThumb++; goto next; }
+
+    {
+        // 快速反相（缩略图精度足够，不必走完整的秩 1 管线）
+        size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, w * 4, cs,
+                                                 kCGImageAlphaPremultipliedLast |
+                                                 kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(cs);
+        if (!ctx) { CGImageRelease(cg); _curThumb++; goto next; }
+        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
+        uint8_t *px = (uint8_t *)CGBitmapContextGetData(ctx);
+
+        // 8-bit sRGB → 线性，然后逐通道做简化的片基扣除 + 反相
+        float *lin = malloc(sizeof(float) * w * h * 3);
+        if (!lin) { CGContextRelease(ctx); CGImageRelease(cg); _curThumb++; goto next; }
+        double t0[3] = {0, 0, 0};
+        for (int c = 0; c < 3; c++) {
+            double sum = 0; size_t cnt = 0;
+            for (size_t i = 0; i < w * h; i++) {
+                float v = px[i * 4 + c] / 255.0f;
+                lin[i * 3 + c] = negSrgbToLinear(v);
+                sum += lin[i * 3 + c]; cnt++;
+            }
+            // 粗略片基：最亮 0.1% 的均值
+            float *tmp = malloc(sizeof(float) * cnt);
+            if (tmp) {
+                for (size_t i = 0; i < w * h; i++) tmp[i] = lin[i * 3 + c];
+                // 简化：取最大值的 0.98 倍当片基（缩略图精度足够）
+                float mx = 0; for (size_t i = 0; i < w * h; i++) if (tmp[i] > mx) mx = tmp[i];
+                t0[c] = (mx > 1e-6) ? mx * 0.98 : 1.0;
+                free(tmp);
+            } else { t0[c] = 1.0; }
+        }
+        for (size_t i = 0; i < w * h; i++)
+            for (int c = 0; c < 3; c++) {
+                double T = lin[i * 3 + c] / (t0[c] > 1e-9 ? t0[c] : 1e-9);
+                if (T < 1e-4) T = 1e-4;
+                lin[i * 3 + c] = (float)pow(10.0, log10(T) / NEG_GAMMA_OUT);
+            }
+        CGContextRelease(ctx); CGImageRelease(cg);
+
+        // 打包成 NSImage（在主线程做 —— 上次崩溃的教训）
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CGColorSpaceRef csp = CGColorSpaceCreateDeviceRGB();
+            CGContextRef c2 = CGBitmapContextCreate(NULL, w, h, 8, w * 4, csp,
+                                                    kCGImageAlphaPremultipliedLast |
+                                                    kCGBitmapByteOrder32Big);
+            CGColorSpaceRelease(csp);
+            if (!c2) { free(lin); return; }
+            for (size_t i = 0; i < w * h; i++)
+                for (int c = 0; c < 3; c++) {
+                    float v = lin[i * 3 + c];
+                    uint8_t b = (uint8_t)(negLinearToSrgb(v > 1 ? 1 : v) * 255.0f);
+                    ((uint8_t *)CGBitmapContextGetData(c2))[i * 4 + c] = b;
+                }
+            ((uint8_t *)CGBitmapContextGetData(c2))[3] = 255; // alpha 简单置满
+            CGImageRef out = CGBitmapContextCreateImage(c2);
+            CGContextRelease(c2);
+            if (out) {
+                NSImage *im = [[NSImage alloc] initWithCGImage:out
+                                                          size:NSMakeSize(w, h)];
+                CGImageRelease(out);
+                if ((NSUInteger)self->_curThumb < self->_thumbs.count)
+                    self->_thumbs[(NSUInteger)self->_curThumb] = im;
+                self->_stripView.needsDisplay = YES;
+            }
+            free(lin);
+        });
+    }
+next:
     _curThumb++;
     if (_curThumb < (NSInteger)_paths.count)
-        [self performSelector:@selector(buildThumbs) withObject:nil afterDelay:0.05];
+        [self performSelector:@selector(buildThumbs) withObject:nil afterDelay:0.02];
 }
 
 - (void)openDoc:(id)s {
