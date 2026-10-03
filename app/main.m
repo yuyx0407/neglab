@@ -724,9 +724,6 @@ static NSString *const TB_HELP  = @"help";
                              accessibilityDescription:@"使用说明"];
         it.target = self;
         it.action = @selector(showGuide:);
-    } else if ([ident isEqualToString:TB_VIEW]) {
-        it.label = @"显示";
-        it.view = _segView;
     }
     return it;
 }
@@ -917,7 +914,7 @@ static NSString *const TB_HELP  = @"help";
 }
 
 - (void)viewChanged:(id)s {
-    _canvas.shown = (_segView.selectedSegment == 0) ? _imgOriginal : _imgResult;
+    _canvas.shown = _imgResult;   // 「原始负片」已删，恒显示结果
 }
 
 - (void)toggleView:(id)s {
@@ -1145,7 +1142,7 @@ static const double DISP_PCT = 99.9;
                                               hiR > 1e-6f ? hiR : 1e-6f)];
     free(o);
 
-    _canvas.shown = (_segView.selectedSegment == 0) ? _imgOriginal : _imgResult;
+    _canvas.shown = _imgResult;   // 「原始负片」已删，恒显示结果
     [self readoutsWithT0:t0];
     [self refreshEnabled];
 }
