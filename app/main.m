@@ -237,6 +237,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
 // ═══════════════════════════════════════════════ 预览画布
 
 @interface NegCanvas : NSView
+@property (nonatomic, copy) void (^onDropFiles)(NSArray<NSString *> *paths);
 @property (nonatomic, strong) NSImage *shown;
 @property (nonatomic, copy) void (^onSample)(double nx, double ny);
 @property (nonatomic) BOOL picking;
@@ -261,6 +262,11 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)isFlipped { return YES; }
+- (void)keyDown:(NSEvent *)e {
+    if (e.keyCode == 123) { [NSApp sendAction:@selector(prevFrame:) to:nil from:self]; return; }
+    if (e.keyCode == 124) { [NSApp sendAction:@selector(nextFrame:) to:nil from:self]; return; }
+    [super keyDown:e];
+}
 
 - (void)setPicking:(BOOL)picking {
     _picking = picking;
@@ -452,6 +458,9 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
 - (void)jumpTo:(NSInteger)i;
 - (void)setPaths:(NSArray<NSString *> *)paths;
 - (void)buildThumbs;
+- (void)openFolder:(id)s;
+- (void)prevFrame:(id)s;
+- (void)nextFrame:(id)s;
 @end
 
 @implementation NegApp {
@@ -770,6 +779,12 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
     [root addSubview:_stripBox];
     root.strip  = _stripBox;
     root.canvas = _canvas;
+    __weak NegApp *wss2 = self;
+    _canvas.onDropFiles = ^(NSArray<NSString *> *ps) {
+        NSMutableArray *sorted = [ps mutableCopy];
+        [sorted sortUsingSelector:@selector(compare:)];
+        [wss2 setPaths:sorted];
+    };
     root.status = _lblStatus;
     root.hair   = hair;
     root.side   = side;
@@ -789,14 +804,14 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
 // ── 工具栏 ─────────────────────────────────────────────────────────────────
 static NSString *const TB_OPEN  = @"open";
 static NSString *const TB_EXPORT= @"export";
-static NSString *const TB_VIEW  = @"view";
+static NSString *const TB_FOLDER  = @"view";
 static NSString *const TB_HELP  = @"help";
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb {
-    return @[ TB_OPEN, TB_EXPORT, NSToolbarFlexibleSpaceItemIdentifier, TB_VIEW, TB_HELP ];
+    return @[ TB_OPEN, TB_EXPORT, NSToolbarFlexibleSpaceItemIdentifier, TB_FOLDER, TB_HELP ];
 }
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb {
-    return @[ TB_OPEN, TB_EXPORT, NSToolbarFlexibleSpaceItemIdentifier, TB_VIEW, TB_HELP ];
+    return @[ TB_OPEN, TB_EXPORT, NSToolbarFlexibleSpaceItemIdentifier, TB_FOLDER, TB_HELP ];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)tb itemForItemIdentifier:(NSToolbarItemIdentifier)ident
@@ -813,6 +828,12 @@ static NSString *const TB_HELP  = @"help";
                              accessibilityDescription:@"导出"];
         it.target = self;
         it.action = @selector(exportDoc:);
+    } else if ([ident isEqualToString:TB_FOLDER]) {
+        it.label = @"打开文件夹";
+        it.image = [NSImage imageWithSystemSymbolName:@"folder.badge.plus"
+                             accessibilityDescription:@"打开文件夹"];
+        it.target = self;
+        it.action = @selector(openFolder:);
     } else if ([ident isEqualToString:TB_HELP]) {
         it.label = @"使用说明";
         it.image = [NSImage imageWithSystemSymbolName:@"questionmark.circle"
@@ -935,6 +956,27 @@ static NSString *const TB_HELP  = @"help";
     [self setStatus:[NSString stringWithFormat:
         @"已装入 %lu 张，正在生成缩略图…", (unsigned long)_paths.count]];
 }
+
+- (void)openFolder:(id)s {
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseDirectories = YES; p.canChooseFiles = NO;
+    p.message = @"选一个装了负片的文件夹。里面的全部图片都会载入。";
+    if ([p runModal] != NSModalResponseOK) return;
+    NSString *dir = p.URL.path;
+    NSArray *all = [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil];
+    NSMutableArray<NSString *> *ps = [NSMutableArray array];
+    NSArray *exts = @[@"tif",@"tiff",@"png",@"jpg",@"jpeg",@"nef",@"nrw",@"cr2",@"cr3",
+                      @"arw",@"srf",@"sr2",@"raf",@"rw2",@"orf",@"dng",@"3fr",@"fff"];
+    for (NSString *fn in all)
+        if ([exts containsObject:fn.pathExtension.lowercaseString])
+            [ps addObject:[dir stringByAppendingPathComponent:fn]];
+    if (!ps.count) { [self setStatus:@"那个文件夹里没有找到负片文件。"]; return; }
+    [ps sortUsingSelector:@selector(compare:)];
+    [self setPaths:ps];
+}
+
+- (void)prevFrame:(id)s { if (_curIdx > 0) [self jumpTo:_curIdx - 1]; }
+- (void)nextFrame:(id)s { if (_curIdx + 1 < (NSInteger)_paths.count) [self jumpTo:_curIdx + 1]; }
 
 - (void)openDoc:(id)s {
     NSOpenPanel *p = [NSOpenPanel openPanel];
