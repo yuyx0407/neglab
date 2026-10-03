@@ -831,6 +831,7 @@ static NSString *const TB_HELP  = @"help";
 // ── 载入 ───────────────────────────────────────────────────────────────────
 // ── 批量导入与胶片条 ───────────────────────────────────────────────────────
 - (void)setPaths:(NSArray<NSString *> *)paths {
+    NSLog(@"NegLab setPaths: 收到 %lu 个文件", (unsigned long)paths.count);
     if (!_stripView) {                          // 界面还没搭好：存起来，等就绪后再走一遍
         _pendingPaths = [paths copy];
         return;
@@ -854,66 +855,54 @@ static NSString *const TB_HELP  = @"help";
 // 避免上次那个「AppKit 方法在后台调用会抛异常」的坑。每帧之间隔 0.05s，
 // 界面在两帧之间是响应的。36 帧全程约 10 秒，可接受。
 - (void)buildThumbs {
-    if (_curThumb < 0 || _curThumb >= (NSInteger)_paths.count) return;
-    NSString *path = _paths[(NSUInteger)_curThumb];
+    // ★ 同步循环跑完全部缩略图，不再用 performSelector 排队。
+    //   排队版的问题：主线程忙时 performSelector 被推迟，链条可能断，
+    //   表现为「39 张只出一张」。同步循环没有这个问题。
+    for (NSUInteger i = 0; i < _paths.count; i++) {
+        NSString *path = _paths[i];
 
-    // ★ 用 ImageIO 的缩略图 API 直接按小尺寸解码，而不是完整解码 45MB 再降采样。
-    //   完整解码一张要 2-5 秒且在主线程上做（UI 会冻住 39 次）；缩略图 API 毫秒级完成。
-    //   缩略图只需要看个大概，不需要科学精度，所以用 sRGB 直读即可。
-    CGImageSourceRef src = CGImageSourceCreateWithURL(
-        (CFURLRef)[NSURL fileURLWithPath:path], NULL);
-    CGImageRef cg = NULL;
-    if (src) {
-        cg = CGImageSourceCreateThumbnailAtIndex(src, 0, (CFDictionaryRef)@{
+        CGImageSourceRef src = CGImageSourceCreateWithURL(
+            (CFURLRef)[NSURL fileURLWithPath:path], NULL);
+        if (!src) continue;
+        CGImageRef cg = CGImageSourceCreateThumbnailAtIndex(src, 0, (CFDictionaryRef)@{
             (NSString *)kCGImageSourceCreateThumbnailFromImageAlways : @YES,
             (NSString *)kCGImageSourceCreateThumbnailWithTransform   : @YES,
             (NSString *)kCGImageSourceThumbnailMaxPixelSize          : @160 });
         CFRelease(src);
-    }
-    if (!cg) { _curThumb++; goto next; }
+        if (!cg) continue;
 
-    {
-        // 快速反相（缩略图精度足够，不必走完整的秩 1 管线）
         size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, w * 4, cs,
                                                  kCGImageAlphaPremultipliedLast |
                                                  kCGBitmapByteOrder32Big);
         CGColorSpaceRelease(cs);
-        if (!ctx) { CGImageRelease(cg); _curThumb++; goto next; }
+        if (!ctx) { CGImageRelease(cg); continue; }
         CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
         uint8_t *px = (uint8_t *)CGBitmapContextGetData(ctx);
 
-        // 8-bit sRGB → 线性，然后逐通道做简化的片基扣除 + 反相
+        // 简化反相：sRGB→线性→粗略片基扣除→去负片 gamma
         float *lin = malloc(sizeof(float) * w * h * 3);
-        if (!lin) { CGContextRelease(ctx); CGImageRelease(cg); _curThumb++; goto next; }
+        if (!lin) { CGContextRelease(ctx); CGImageRelease(cg); continue; }
         double t0[3] = {0, 0, 0};
         for (int c = 0; c < 3; c++) {
-            double sum = 0; size_t cnt = 0;
-            for (size_t i = 0; i < w * h; i++) {
-                float v = px[i * 4 + c] / 255.0f;
-                lin[i * 3 + c] = negSrgbToLinear(v);
-                sum += lin[i * 3 + c]; cnt++;
+            float mx = 0;
+            for (size_t j = 0; j < w * h; j++) {
+                float v = negSrgbToLinear(px[j * 4 + c] / 255.0f);
+                lin[j * 3 + c] = v;
+                if (v > mx) mx = v;
             }
-            // 粗略片基：最亮 0.1% 的均值
-            float *tmp = malloc(sizeof(float) * cnt);
-            if (tmp) {
-                for (size_t i = 0; i < w * h; i++) tmp[i] = lin[i * 3 + c];
-                // 简化：取最大值的 0.98 倍当片基（缩略图精度足够）
-                float mx = 0; for (size_t i = 0; i < w * h; i++) if (tmp[i] > mx) mx = tmp[i];
-                t0[c] = (mx > 1e-6) ? mx * 0.98 : 1.0;
-                free(tmp);
-            } else { t0[c] = 1.0; }
+            t0[c] = (mx > 1e-6) ? mx * 0.98 : 1.0;
         }
-        for (size_t i = 0; i < w * h; i++)
+        for (size_t j = 0; j < w * h; j++)
             for (int c = 0; c < 3; c++) {
-                double T = lin[i * 3 + c] / (t0[c] > 1e-9 ? t0[c] : 1e-9);
+                double T = lin[j * 3 + c] / (t0[c] > 1e-9 ? t0[c] : 1e-9);
                 if (T < 1e-4) T = 1e-4;
-                lin[i * 3 + c] = (float)pow(10.0, log10(T) / NEG_GAMMA_OUT);
+                lin[j * 3 + c] = (float)pow(10.0, log10(T) / NEG_GAMMA_OUT);
             }
         CGContextRelease(ctx); CGImageRelease(cg);
 
-        // 打包成 NSImage（在主线程做 —— 上次崩溃的教训）
+        // 打包成 NSImage（主线程 —— 上次崩溃的教训）
         dispatch_async(dispatch_get_main_queue(), ^{
             CGColorSpaceRef csp = CGColorSpaceCreateDeviceRGB();
             CGContextRef c2 = CGBitmapContextCreate(NULL, w, h, 8, w * 4, csp,
@@ -921,37 +910,37 @@ static NSString *const TB_HELP  = @"help";
                                                     kCGBitmapByteOrder32Big);
             CGColorSpaceRelease(csp);
             if (!c2) { free(lin); return; }
-            for (size_t i = 0; i < w * h; i++)
+            for (size_t j = 0; j < w * h; j++)
                 for (int c = 0; c < 3; c++) {
-                    float v = lin[i * 3 + c];
-                    uint8_t b = (uint8_t)(negLinearToSrgb(v > 1 ? 1 : v) * 255.0f);
-                    ((uint8_t *)CGBitmapContextGetData(c2))[i * 4 + c] = b;
+                    float v = lin[j * 3 + c];
+                    ((uint8_t *)CGBitmapContextGetData(c2))[j * 4 + c] =
+                        (uint8_t)(negLinearToSrgb(v > 1 ? 1 : v) * 255.0f);
                 }
-            ((uint8_t *)CGBitmapContextGetData(c2))[3] = 255; // alpha 简单置满
-            CGImageRef out = CGBitmapContextCreateImage(c2);
+            CGImageRef outImg = CGBitmapContextCreateImage(c2);
             CGContextRelease(c2);
-            if (out) {
-                NSImage *im = [[NSImage alloc] initWithCGImage:out
+            if (outImg) {
+                NSImage *im = [[NSImage alloc] initWithCGImage:outImg
                                                           size:NSMakeSize(w, h)];
-                CGImageRelease(out);
-                if ((NSUInteger)self->_curThumb < self->_thumbs.count)
-                    self->_thumbs[(NSUInteger)self->_curThumb] = im;
+                CGImageRelease(outImg);
+                if (i < self->_thumbs.count) self->_thumbs[i] = im;
                 self->_stripView.needsDisplay = YES;
+                if (i == self->_paths.count - 1)
+                    [self setStatus:[NSString stringWithFormat:
+                        @"%lu 张缩略图已就绪。点胶片条换片。",
+                        (unsigned long)self->_paths.count]];
             }
             free(lin);
         });
     }
-next:
-    _curThumb++;
-    if (_curThumb < (NSInteger)_paths.count)
-        [self performSelector:@selector(buildThumbs) withObject:nil afterDelay:0.02];
+    [self setStatus:[NSString stringWithFormat:
+        @"已装入 %lu 张，正在生成缩略图…", (unsigned long)_paths.count]];
 }
 
 - (void)openDoc:(id)s {
     NSOpenPanel *p = [NSOpenPanel openPanel];
     p.allowsMultipleSelection = YES;
     p.canChooseDirectories = NO;
-    p.message = @"选一张负片：店家扫的 TIFF，或你自己翻拍的相机 raw。";
+    p.message = @"选负片。可以一次选多张（按 ⌘ 点选，或 ⇧ 选范围）。";
     if ([p runModal] != NSModalResponseOK) return;
     NSMutableArray<NSString *> *ps = [NSMutableArray array];
     for (NSURL *u in p.URLs) if (u.isFileURL) [ps addObject:u.path];
