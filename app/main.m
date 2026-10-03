@@ -871,12 +871,17 @@ static NSString *const TB_HELP  = @"help";
                 break;
             }
         [self setStatus:@"零点改用自动：取画面最亮的那 0.05%。黑白边干净的画面最准。"];
-    } else if (!_haveBase) {
-        _segZero.selectedSegment = 0;
-        [self setStatus:@"「手动点选」要先在图上点一下片基。"];
-        return;
+    } else {
+        // ★ 选「手动点选」= 进入**等待态**：先允许用户去点，点了才会有值。
+        //   旧写法在 _haveBase 为假时直接把选中项弹回「自动」并 return，
+        //   于是用户一点它自己就跳回去 —— 现象就是「按钮点不动」。
+        //   分段控件在这里是「模式选择」，不是「结果显示」。
+        _mode = 1;                       // 1 = 等用户点片基
+        _canvas.picking = YES;           // 光标切成取点状
+        [self setStatus:@"请在图上点一下未曝光的片基（齿孔区、帧边透明条最准）。"];
     }
     [_canvas setNeedsDisplay:YES];
+    [self refreshEnabled];
     [self renderViews];
 }
 
