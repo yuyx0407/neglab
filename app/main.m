@@ -377,13 +377,33 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
 - (void)setSel:(NSInteger)v { _sel = v; self.needsDisplay = YES; }
 - (void)drawRect:(NSRect)d {
     CGFloat x = TH_GAP;
+    // 背景 + 总数提示：让用户知道胶片条在这儿，不是被吞掉了
+    [[NSColor controlBackgroundColor] setFill];
+    NSBezierPath *bg = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(2, 2, d.size.width - 4, d.size.height - 4)
+                                                       xRadius:4 yRadius:4];
+    [[NSColor separatorColor] setStroke]; bg.lineWidth = 0.5; [bg stroke]; [bg fill];
+    if (_thumbs.count == 0) {
+        [[NSColor tertiaryLabelColor] set];
+        [@"正在装入…" drawAtPoint:NSMakePoint(10, d.size.height / 2 - 6)
+                   withAttributes:@{ NSFontAttributeName : [NSFont systemFontOfSize:12],
+                                     NSForegroundColorAttributeName : NSColor.tertiaryLabelColor }];
+        return;
+    }
     for (NSUInteger i = 0; i < _thumbs.count; i++) {
         NSRect r = NSMakeRect(x, TH_GAP, TH_W, TH_H);
         if (NSIntersectsRect(r, d)) {
             NSImage *im = _thumbs[i];
-            if ([im isKindOfClass:[NSImage class]]) [im drawInRect:r fromRect:NSZeroRect
-                         operation:NSCompositingOperationSourceOver fraction:1.0];
-            else { [[NSColor quaternaryLabelColor] setFill]; NSRectFill(r); }
+            if ([im isKindOfClass:[NSImage class]]) {
+                [im drawInRect:r fromRect:NSZeroRect
+                     operation:NSCompositingOperationSourceOver fraction:1.0];
+            } else {                                    // 占位：画序号，告诉用户在排队
+                [[NSColor quaternaryLabelColor] setFill]; NSRectFill(r);
+                [[NSColor tertiaryLabelColor] set];
+                NSString *t = [NSString stringWithFormat:@"%@", @(i + 1)];
+                [t drawAtPoint:NSMakePoint(r.origin.x + r.size.width/2 - 5,
+                                           r.origin.y + r.size.height/2 - 7)
+                 withAttributes:@{ NSFontAttributeName : [NSFont systemFontOfSize:13] }];
+            }
             if ((NSInteger)i == _sel) {
                 [[NSColor controlAccentColor] setStroke];
                 NSBezierPath *bp = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r,-2,-2)
