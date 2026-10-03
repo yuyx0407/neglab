@@ -386,7 +386,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     NSSegmentedControl *_segView, *_segZero;
     NSButton *_chkLock;
     NSButton *_btnGrey, *_btnUndo, *_btnClearCal;
-    NegSliderRow *_slGammaR, *_slGammaB, *_slExposure, *_slBlack;
+    NegSliderRow *_slGammaR, *_slGammaB, *_slExposure, *_slY, *_slM, *_slC;
     NSScrollView *_sidebar;
     NSWindow *_guide;
 
@@ -535,14 +535,17 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
 
     // ── ③ 输出 ──
     _slExposure = [[NegSliderRow alloc] initWithTitle:@"曝光" lo:-2 hi:2 val:0 fmt:@"%+.2f"];
-    _slBlack    = [[NegSliderRow alloc] initWithTitle:@"黑点" lo:0 hi:0.05 val:0 fmt:@"%.4f"];
-    for (NegSliderRow *r in @[_slExposure, _slBlack]) {
+    // 数字放大机的滤色片。单位 CC（1 CC = 0.01 密度），刻度用真放大机头的 Y/M/C。
+    _slY = [[NegSliderRow alloc] initWithTitle:@"Y" lo:-100 hi:100 val:0 fmt:@"%.0f"];
+    _slM = [[NegSliderRow alloc] initWithTitle:@"M" lo:-100 hi:100 val:0 fmt:@"%.0f"];
+    _slC = [[NegSliderRow alloc] initWithTitle:@"C" lo:-100 hi:100 val:0 fmt:@"%.0f"];
+    for (NegSliderRow *r in @[_slExposure, _slY, _slM, _slC]) {
         r.slider.target = self;
         r.slider.action = @selector(outputChanged:);
     }
     _lblHealth = mkHelp(@"");
     NegCard *cardOut = mkCard(@"③ 输出　只改明暗，不改中性",
-        @[_slExposure, _slBlack, _lblHealth]);
+        @[_slExposure, _slY, _slM, _slC, _lblHealth]);
 
     // ── 组装 ──
     NSStackView *stack = vstack(@[cardFile, cardZero, cardGamma, cardOut], GAP_CARD);
@@ -1064,6 +1067,17 @@ static NSString *const TB_HELP  = @"help";
 // 导出与预览用同一个百分位，免得「所见非所得」。
 static const double DISP_PCT = 99.9;
 
+// 数字放大机的滤色片。单位 CC（1 CC = 0.01 密度），刻度用真放大机头的 Y/M/C。
+// 滤色片吸收哪一段，就减哪一层曝光：Y→蓝层、M→绿层、C→红层。
+// 方向与暗房一致：加 Y 偏蓝、加 M 偏绿、加 C 偏红。
+// 数学上等价于把 o_c 换成 o_c + γ_c·d_c，所以 NegMath 不必改签名。
+- (void)effOffset:(double *)o {
+    double d[3] = { _slC.slider.doubleValue / 100.0,
+                    _slM.slider.doubleValue / 100.0,
+                    _slY.slider.doubleValue / 100.0 };
+    for (int c = 0; c < 3; c++) o[c] = _offset[c] + _gamma[c] * d[c];
+}
+
 - (void)renderViews {
     if (!_proxy.rgb) { [self refreshEnabled]; return; }
     size_t n = _proxy.w * _proxy.h;
@@ -1078,9 +1092,10 @@ static const double DISP_PCT = 99.9;
     double t0[3];
     [self curT0:t0];
     memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
-    negInvert(o, n, t0, _gamma, _offset, _lRef,
+    double off2[3]; [self effOffset:off2];
+    negInvert(o, n, t0, _gamma, off2, _lRef,
               pow(2.0, _slExposure.slider.doubleValue),
-              _slBlack.slider.doubleValue, NEG_PI_CLIP_DEFAULT);
+              0.0, NEG_PI_CLIP_DEFAULT);
     float hiR = negGreenPercentile(o, _proxy.w, _proxy.h, DISP_PCT);
     _imgResult = [self imageFromRGBA:negRGBA8(o, _proxy.w, _proxy.h,
                                               hiR > 1e-6f ? hiR : 1e-6f)];
@@ -1215,9 +1230,10 @@ static const double DISP_PCT = 99.9;
     double t0[3];
     [self curT0:t0];
     memcpy(o, _full.rgb, sizeof(float) * n * 3);
-    negInvert(o, n, t0, _gamma, _offset, _lRef,
+    double off2[3]; [self effOffset:off2];
+    negInvert(o, n, t0, _gamma, off2, _lRef,
               pow(2.0, _slExposure.slider.doubleValue),
-              _slBlack.slider.doubleValue, NEG_PI_CLIP_DEFAULT);
+              0.0, NEG_PI_CLIP_DEFAULT);
 
     char err[256] = {0};
     int r;
