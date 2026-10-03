@@ -283,18 +283,41 @@ static void median3x3(const float *src, float *dst, size_t w, size_t h) {
     }
 }
 
-void negEstimateZero(const float *rgb, size_t w, size_t h, double topFrac, double t0[3]) {
+void negEstimateZero(const float *rgb_in, size_t w, size_t h, double topFrac, double t0[3]) {
     t0[0] = t0[1] = t0[2] = 1.0;
-    size_t n = w * h;
-    if (!rgb || !n || !t0) return;
+    if (!rgb_in || !w || !h || !t0) return;
     if (topFrac <= 0 || topFrac > 0.5) topFrac = 0.0005;
 
+    // ★ 片基是大面积属性，不需要全分辨率：超过 2MP 就先做 2×2 盒式降采样。
+    //   36MP 上把 3×3 中值从数秒压到零点几秒；均值面积更大，估计也更稳。
+    //   降采样在函数内做，避免 NegMath 反向依赖 NegImage 的 negDownsample。
+    const float *rgb = rgb_in;
+    float *own = NULL;
+    while ((double)w * (double)h > 2.0e6) {
+        size_t nw = w / 2, nh = h / 2;
+        if (nw < 2 || nh < 2) break;
+        float *d = malloc(sizeof(float) * nw * nh * 3);
+        if (!d) break;
+        for (size_t y = 0; y < nh; y++)
+            for (size_t x = 0; x < nw; x++)
+                for (int c = 0; c < 3; c++)
+                    d[(y * nw + x) * 3 + c] = 0.25f *
+                        (rgb[(y * 2 * w + x * 2) * 3 + c] +
+                         rgb[(y * 2 * w + x * 2 + 1) * 3 + c] +
+                         rgb[((y * 2 + 1) * w + x * 2) * 3 + c] +
+                         rgb[((y * 2 + 1) * w + x * 2 + 1) * 3 + c]);
+        if (own) free(own);
+        rgb = d; own = d; w = nw; h = nh;
+    }
+
+    size_t n = w * h;
+
     float *sm = malloc(sizeof(float) * n * 3);
-    if (!sm) return;
+    if (!sm) { if (own) free(own); return; }
     median3x3(rgb, sm, w, h);
 
     float *ch = malloc(sizeof(float) * n);
-    if (!ch) { free(sm); return; }
+    if (!ch) { free(sm); if (own) free(own); return; }
     for (int c = 0; c < 3; c++) {
         for (size_t i = 0; i < n; i++) ch[i] = sm[i * 3 + c];
         // 直方图求出「最亮 topFrac」的下界，再一趟求和取均值（都是 O(n)）
@@ -308,4 +331,5 @@ void negEstimateZero(const float *rgb, size_t w, size_t h, double topFrac, doubl
     }
     free(ch);
     free(sm);
+    if (own) free(own);
 }
