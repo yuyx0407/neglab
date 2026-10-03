@@ -124,6 +124,7 @@ def main(paths):
            "anchor_log2_RG_range": round(float(rgl.max()-rgl.min()), 4),
            "anchor_log2_BG_range": round(float(bgl.max()-bgl.min()), 4)}
     op = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "anchor_check.json")
+    os.makedirs(os.path.dirname(op), exist_ok=True)   # 首次运行时 logs/ 还不存在
     json.dump(out, open(op, "w"), ensure_ascii=False, indent=1)
     print("→", op)
 
