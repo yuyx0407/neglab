@@ -107,8 +107,14 @@ int main(int argc, const char **argv) {
                        t0[0], t0[1], t0[2]);
             }
             size_t n = f.w * f.h;
-            negInvert(f.rgb, n, t0, gamma, offset, lRef,
-                      pow(2.0, ev), black, NEG_PI_CLIP_DEFAULT);
+            negInvert(f.rgb, n, t0, gamma, offset, lRef, NEG_PI_CLIP_DEFAULT, 0);
+            if (ev != 0.0 || black != 0.0) {          // 曝光/黑点在反相之后作用
+                double k = pow(2.0, ev);
+                for (size_t q = 0; q < n * 3; q++) {
+                    double v = f.rgb[q] * k - black;
+                    f.rgb[q] = (float)(v > 0 ? v : 0);
+                }
+            }
             float hi = negGreenPercentile(f.rgb, f.w, f.h, DISP_PCT);
             if (hi < 1e-6f) hi = 1e-6f;
 

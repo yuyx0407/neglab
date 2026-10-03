@@ -90,7 +90,7 @@ int main(void) {
             double t0b[3];
             for (int c = 0; c < 3; c++)
                 t0b[c] = pow(10.0, -(BASE_D[c] + GAMMA_TRUE[c] * l0s[k]));
-            negInvert(B, 5, t0b, GAMMA_TRUE, cal.offset, cal.lRef, 1.0, 0.0, 0.0);
+            negInvert(B, 5, t0b, GAMMA_TRUE, cal.offset, cal.lRef, 0.0, 0);
             double d = devStops(B, 5);
             printf("     %-14s L0=%+.2f  输出最大通道差 = %.8f 档  %s\n",
                    nm[k], l0s[k], d, d < 1e-5 ? "✅" : "✗");
@@ -129,9 +129,9 @@ int main(void) {
         //   量出来的是「没标定」，不是「截断造成的」。
         double d18, d25, d99;
         float B[36];
-        memcpy(B,S,sizeof(B)); negInvert(B,12,t0,GAMMA_TRUE,zero,0,1.0,0.0,1.8); d18 = devStops(B,12);
-        memcpy(B,S,sizeof(B)); negInvert(B,12,t0,GAMMA_TRUE,zero,0,1.0,0.0,2.5); d25 = devStops(B,12);
-        memcpy(B,S,sizeof(B)); negInvert(B,12,t0,GAMMA_TRUE,zero,0,1.0,0.0,99.0); d99 = devStops(B,12);
+        memcpy(B,S,sizeof(B)); negInvert(B,12,t0,GAMMA_TRUE,zero,0, 1.8, 0); d18 = devStops(B,12);
+        memcpy(B,S,sizeof(B)); negInvert(B,12,t0,GAMMA_TRUE,zero,0, 2.5, 0); d25 = devStops(B,12);
+        memcpy(B,S,sizeof(B)); negInvert(B,12,t0,GAMMA_TRUE,zero,0, 99.0, 0); d99 = devStops(B,12);
         printf("   PI_CLIP=1.8   输出最大通道差 = %8.4f 档\n", d18);
         printf("   PI_CLIP=2.5   输出最大通道差 = %8.4f 档\n", d25);
         printf("   PI_CLIP=99    输出最大通道差 = %8.4f 档\n", d99);
@@ -147,7 +147,7 @@ int main(void) {
         float S[30]; for (int i = 0; i < 10; i++)
             for (int c = 0; c < 3; c++) S[i*3+c] = 0.01f + i * 0.11f;
         double t0[3] = {1.0,1.0,1.0}, one[3] = {1.0,1.0,1.0}, zero[3] = {0,0,0};
-        negInvert(S, 10, t0, one, zero, 0, 1.0, 0.0, 2.5);
+        negInvert(S, 10, t0, one, zero, 0, 2.5, 0);
         int mono = 1;
         for (int i = 1; i < 10; i++) if (S[i*3+1] > S[(i-1)*3+1] + 1e-6) mono = 0;
         printf("   输出（绿通道）= ");

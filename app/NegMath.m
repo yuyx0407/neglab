@@ -133,9 +133,27 @@ int negFitGamma(const float *samples, int n, const double t0[3], NegCal *out) {
     return 0;
 }
 
+// 第二层：2383 印片观感（近似）。
+// 输入是第一层产出的线性亮度 v。2383 公开 H&D 曲线的形状是：
+//   趾部 logE<0.2 不感光，直线段 0.2..1.2 斜率≈3，肩部 >2.0 饱和于 D≈4。
+// 印片曝光与场景亮度的关系是 logE_p = c + x（x = −log10 v）—— 场景越暗负片越透、
+// 印片曝光越大、印片越黑。c 是印片机的曝光旋钮，这里取 0.15，绝对位置交给用户的曝光滑杆。
+// ★ 这是观感近似，不是物理模拟：用的是三通道平均曲线（逐通道会引入偏色，
+//   除非采集链与 2383 的分光严格互逆）。物理级模拟见 docs 里刘磊那篇。
+static float negPrintLook(float v) {
+    if (v <= 1e-7f) return 0.0f;
+    double x = -log10((double)v);
+    double logE = 0.15 + x;
+    double D;
+    if (logE <= 0.0)      D = 0.0;
+    else if (logE >= 2.0) D = 4.0;
+    else                  D = 2.6 * logE;
+    return (float)pow(10.0, -D);
+}
+
 void negInvert(float *buf, size_t length,
                const double t0[3], const double gamma[3], const double offset[3],
-               double lRef, double exposure, double black, double piClip) {
+               double lRef, double piClip, int paper) {
     if (!buf) return;
     if (piClip <= 0) piClip = NEG_PI_CLIP_DEFAULT;
     double loT = pow(10.0, -piClip);
@@ -144,14 +162,13 @@ void negInvert(float *buf, size_t length,
         for (int c = 0; c < 3; c++) {
             double T = (double)px[c] / (t0[c] > 1e-9 ? t0[c] : 1e-9);
             if (T > 1.0) T = 1.0;
-            if (T < loT) T = loT;            // ← 密度上限在这里生效
+            if (T < loT) T = loT;
             double L = (-log10(T) - offset[c]) / (fabs(gamma[c]) > 1e-9 ? gamma[c] : 1.0);
             L -= lRef;
             if (L < 0) L = 0;
-            double out = pow(10.0, L / NEG_GAMMA_OUT) - 1.0;
+            double out = pow(10.0, L / NEG_GAMMA_OUT) - 1.0;   // 第一层：线性母版
             if (out < 0) out = 0;
-            if (black > 0) { out -= black; if (out < 0) out = 0; }
-            if (exposure != 1.0) out *= exposure;
+            if (paper == NEG_PAPER_PRINT) out = negPrintLook(out);  // 第二层：印片观感
             px[c] = (float)out;
         }
     }

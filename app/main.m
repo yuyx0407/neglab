@@ -395,6 +395,8 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     NSButton *_chkLock;
     NSButton *_btnGrey, *_btnUndo, *_btnClearCal;
     NegSliderRow *_slGammaR, *_slGammaB, *_slExposure, *_slY, *_slM, *_slC;
+    NSSegmentedControl *_segPaper;
+    int _paper;
     NSScrollView *_sidebar;
     NSWindow *_guide;
 
@@ -551,8 +553,16 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
         r.slider.action = @selector(outputChanged:);
     }
     _lblHealth = mkHelp(@"");
+    _segPaper = [NSSegmentedControl segmentedControlWithLabels:@[ @"线性母版", @"印片 (2383)" ]
+                                                  trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                        target:self action:@selector(paperChanged:)];
+    _segPaper.selectedSegment = 0;
+    _segPaper.controlSize = NSControlSizeSmall;
+    _segPaper.segmentDistribution = NSSegmentDistributionFillEqually;
+
     NegCard *cardOut = mkCard(@"③ 输出　Y/M/C = 印片机滤色片（CC）",
         @[_slExposure, _slY, _slM, _slC,
+          _segPaper,
           mkHelp(@"Y/M/C 是印片机的滤色片，单位 CC：1 CC ≈ 0.01 密度，30 CC ≈ 1 档。\n"
                  @"0 CC = 本次标定确定的中性 —— 所以先把标定做掉，这里的零点才有意义。\n"
                  @"方向与暗房一致：加 Y 偏蓝、加 M 偏绿、加 C 偏红。\n"
@@ -899,6 +909,8 @@ static NSString *const TB_HELP  = @"help";
     [self renderViews];
 }
 
+- (void)paperChanged:(id)s { _paper = (int)_segPaper.selectedSegment; [self renderViews]; }
+
 - (void)outputChanged:(id)s {
     [_slExposure refresh]; [_slY refresh]; [_slM refresh]; [_slC refresh];
     [self renderViews];
@@ -1123,7 +1135,7 @@ static const double DISP_PCT = 99.9;
     [self curT0:t0];
     memcpy(o, _proxy.rgb, sizeof(float) * n * 3);
     double off2[3]; [self effOffset:off2];
-    negInvert(o, n, t0, _gamma, off2, _lRef, 1.0, 0.0, NEG_PI_CLIP_DEFAULT);
+    negInvert(o, n, t0, _gamma, off2, _lRef, NEG_PI_CLIP_DEFAULT, _paper);
     // ★ 曝光必须作用在**白点之后**。白点取的是画面自己的百分位，
     //   在它之前乘一个整体系数会被下一次归一化精确抵消 —— 这就是「曝光调不动」的根因。
     //   物理上也对：曝光是印片机的曝光，作用在相纸上，不作用在负片上。
@@ -1263,7 +1275,7 @@ static const double DISP_PCT = 99.9;
     [self curT0:t0];
     memcpy(o, _full.rgb, sizeof(float) * n * 3);
     double off2[3]; [self effOffset:off2];
-    negInvert(o, n, t0, _gamma, off2, _lRef, 1.0, 0.0, NEG_PI_CLIP_DEFAULT);
+    negInvert(o, n, t0, _gamma, off2, _lRef, NEG_PI_CLIP_DEFAULT, _paper);
     double gain = pow(2.0, _slExposure.slider.doubleValue);
 
     char err[256] = {0};

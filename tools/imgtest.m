@@ -32,7 +32,7 @@ int main(int argc, const char **argv) {
             if (cp) {
                 memcpy(cp, f.rgb, sizeof(float) * n * 3);
                 double g[3] = {0.9331, 1.0, 1.6264}, o[3] = {0, 0, 0};
-                negInvert(cp, n, t0, g, o, 0.0, 1.0, 0.0, NEG_PI_CLIP_DEFAULT);
+                negInvert(cp, n, t0, g, o, 0.0, NEG_PI_CLIP_DEFAULT, 0);
                 float hi = negGreenPercentile(cp, f.w, f.h, 99.5);
                 unsigned char *rgba = negRGBA8(cp, f.w, f.h, hi > 1e-9f ? hi : 1e-9f);
                 printf("    反相后左上角 = %.5f %.5f %.5f   预览像素 = %d,%d,%d\n",

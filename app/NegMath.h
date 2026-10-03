@@ -42,9 +42,12 @@ float negLinearToSrgb(float x);
 int negFitGamma(const float *samples, int n, const double t0[3], NegCal *out);
 
 // 反相一整块 RGB float 缓冲（原地）。length = 像素数。
-void negInvert(float *buf, size_t length,
-               const double t0[3], const double gamma[3], const double offset[3],
-               double lRef, double exposure, double black, double piClip);
+enum { NEG_PAPER_LINEAR = 0, NEG_PAPER_PRINT = 1 };
+
+// paper: NEG_PAPER_LINEAR = 线性母版（10^(L/0.6)−1，供后续分级）；
+//        NEG_PAPER_PRINT  = 在母版之上再过一道 2383 印片观感（见 NegMath.m 的说明）。
+void negInvert(float *buf, size_t length, const double t0[3], const double gamma[3],
+               const double offset[3], double lRef, double piClip, int paper);
 
 // 中性残差：给定点上三通道曝光坐标的最大散差，换算成「档」。
 //   ΔL × 0.6 / log10(2)     即「以 0.6 印片 γ 计的输出密度差，折合成档」
