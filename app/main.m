@@ -429,6 +429,7 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
 
 @interface NegRoot : NSView
 @property (nonatomic, weak) NSView *canvas, *status, *hair, *side, *strip;
+@property (nonatomic, copy) void (^onDropFiles)(NSArray<NSString *> *paths);
 @end
 
 @implementation NegRoot
@@ -451,6 +452,16 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
     CGFloat ch = H - cy - pad;
     if (ch < 80) ch = 80;
     self.canvas.frame = NSMakeRect(pad, cy, cw, ch);
+}
+- (NSDragOperation)draggingEntered:(id <NSDraggingInfo>)sender { return NSDragOperationCopy; }
+- (BOOL)performDragOperation:(id <NSDraggingInfo>)sender {
+    NSPasteboard *pb = [sender draggingPasteboard];
+    NSArray<NSURL *> *urls = [pb readObjectsForClasses:@[ NSURL.class ] options:nil];
+    if (!urls.count || !self.onDropFiles) return NO;
+    NSMutableArray<NSString *> *ps = [NSMutableArray array];
+    for (NSURL *u in urls) if (u.isFileURL) [ps addObject:u.path];
+    if (ps.count) { self.onDropFiles(ps); return YES; }
+    return NO;
 }
 @end
 
@@ -779,6 +790,16 @@ static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
     [root addSubview:_stripBox];
     root.strip  = _stripBox;
     root.canvas = _canvas;
+    [root registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
+    __weak NegRoot *wrs = root;
+    root.onDropFiles = ^(NSArray<NSString *> *ps) {
+        NSMutableArray *sorted = [ps mutableCopy];
+        [sorted sortUsingSelector:@selector(compare:)];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [(id)wrs.window.delegate performSelector:@selector(setPaths:)
+                                          withObject:sorted];
+        });
+    };
     __weak NegApp *wss2 = self;
     _canvas.onDropFiles = ^(NSArray<NSString *> *ps) {
         NSMutableArray *sorted = [ps mutableCopy];
