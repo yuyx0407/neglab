@@ -184,6 +184,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
 @interface NegSliderRow : NSStackView
 @property (nonatomic, strong) NSSlider *slider;
 @property (nonatomic, strong) NSTextField *value;
+@property (nonatomic, copy)   NSString   *fmt;   // 记下来，滑杆动了才能刷新读数
 - (instancetype)initWithTitle:(NSString *)title lo:(double)lo hi:(double)hi
                           val:(double)val fmt:(NSString *)fmt;
 @end
@@ -214,6 +215,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     [_slider setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 2
                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
 
+    _fmt = fmt;
     _value = mkValue([NSString stringWithFormat:fmt, val]);
     _value.translatesAutoresizingMaskIntoConstraints = NO;
     [_value.widthAnchor constraintEqualToConstant:58].active = YES;
@@ -223,6 +225,12 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     [self addArrangedSubview:_value];
     [self.heightAnchor constraintGreaterThanOrEqualToConstant:24].active = YES;
     return self;
+}
+
+// 滑杆一动就刷新右侧读数。原来只在初始化时写一次，所以数字永远不动。
+- (void)refresh {
+    self.value.stringValue = [NSString stringWithFormat:self.fmt, self.slider.doubleValue];
+
 }
 @end
 
@@ -534,7 +542,7 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
         @[rowGrey, rowFit, _slGammaR, _slGammaB, _lblFit, _btnClearCal, rowCal]);
 
     // ── ③ 输出 ──
-    _slExposure = [[NegSliderRow alloc] initWithTitle:@"曝光" lo:-2 hi:2 val:0 fmt:@"%+.2f"];
+    _slExposure = [[NegSliderRow alloc] initWithTitle:@"曝光" lo:-6 hi:6 val:0 fmt:@"%+.2f"];
     // 数字放大机的滤色片。单位 CC（1 CC = 0.01 密度），刻度用真放大机头的 Y/M/C。
     _slY = [[NegSliderRow alloc] initWithTitle:@"Y" lo:-100 hi:100 val:0 fmt:@"%.0f"];
     _slM = [[NegSliderRow alloc] initWithTitle:@"M" lo:-100 hi:100 val:0 fmt:@"%.0f"];
@@ -876,7 +884,10 @@ static NSString *const TB_HELP  = @"help";
     [self renderViews];
 }
 
-- (void)outputChanged:(id)s { [self renderViews]; }
+- (void)outputChanged:(id)s {
+    [_slExposure refresh]; [_slY refresh]; [_slM refresh]; [_slC refresh];
+    [self renderViews];
+}
 
 - (void)viewChanged:(id)s {
     _canvas.shown = (_segView.selectedSegment == 0) ? _imgOriginal : _imgResult;
