@@ -361,8 +361,48 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
 // （这台机器上实测窗口被钉成 691 × 754，画布只剩 303 pt 宽，连冲突日志都不打）。
 // 顶层这四块用框架布局就没有这个问题：窗口尺寸是**因**，各块的位置是**果**。
 // 侧栏内部仍然用 Auto Layout —— 它的宽度是固定的，不会反过来影响窗口。
+// ── 胶片条：横向缩略图，点哪张载哪张 ───────────────────────────────────────
+// 自绘而非用 NSButton：按钮数量随卷长变化，自绘省掉一整套增删与生命周期管理。
+static const CGFloat TH_W = 96, TH_H = 64, TH_GAP = 8;
+
+@interface NegStrip : NSView
+@property (nonatomic, strong) NSMutableArray<NSImage *> *thumbs;
+@property (nonatomic) NSInteger sel;
+@property (nonatomic, copy) void (^onPick)(NSInteger idx);
+@end
+
+@implementation NegStrip
+- (BOOL)isFlipped { return YES; }
+- (void)setThumbs:(NSMutableArray<NSImage *> *)t { _thumbs = t; self.needsDisplay = YES; }
+- (void)setSel:(NSInteger)v { _sel = v; self.needsDisplay = YES; }
+- (void)drawRect:(NSRect)d {
+    CGFloat x = TH_GAP;
+    for (NSUInteger i = 0; i < _thumbs.count; i++) {
+        NSRect r = NSMakeRect(x, TH_GAP, TH_W, TH_H);
+        if (NSIntersectsRect(r, d)) {
+            NSImage *im = _thumbs[i];
+            if ([im isKindOfClass:[NSImage class]]) [im drawInRect:r fromRect:NSZeroRect
+                         operation:NSCompositingOperationSourceOver fraction:1.0];
+            else { [[NSColor quaternaryLabelColor] setFill]; NSRectFill(r); }
+            if ((NSInteger)i == _sel) {
+                [[NSColor controlAccentColor] setStroke];
+                NSBezierPath *bp = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r,-2,-2)
+                                                                   xRadius:5 yRadius:5];
+                bp.lineWidth = 2.5; [bp stroke];
+            }
+        }
+        x += TH_W + TH_GAP;
+    }
+}
+- (void)mouseDown:(NSEvent *)e {
+    NSPoint pt = [self convertPoint:e.locationInWindow fromView:nil];
+    NSInteger i = (NSInteger)floor(pt.x / (TH_W + TH_GAP));
+    if (i >= 0 && i < (NSInteger)_thumbs.count && _onPick) _onPick(i);
+}
+@end
+
 @interface NegRoot : NSView
-@property (nonatomic, weak) NSView *canvas, *status, *hair, *side;
+@property (nonatomic, weak) NSView *canvas, *status, *hair, *side, *strip;
 @end
 
 @implementation NegRoot
@@ -379,10 +419,19 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     if (cw < 80) cw = 80;
     CGFloat cy = 16 + statusH + 10;
     self.status.frame = NSMakeRect(pad, 16, cw, statusH);
+    CGFloat sy = 16 + statusH + 10, sH = TH_H + 2 * TH_GAP;
+    self.strip.frame = NSMakeRect(pad, sy, cw, sH);
+    cy = sy + sH + 10;
     CGFloat ch = H - cy - pad;
     if (ch < 80) ch = 80;
     self.canvas.frame = NSMakeRect(pad, cy, cw, ch);
 }
+@end
+
+@interface NegApp ()
+- (void)jumpTo:(NSInteger)i;
+- (void)setPaths:(NSArray<NSString *> *)paths;
+- (void)buildThumbs;
 @end
 
 @implementation NegApp {
@@ -398,6 +447,12 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     NSSegmentedControl *_segPaper;
     int _paper;
     NSScrollView *_sidebar;
+    NSScrollView *_stripBox;
+    NegStrip *_stripView;
+    NSMutableArray<NSString *> *_paths;
+    NSMutableArray<NSImage *> *_thumbs;
+    NSInteger _curIdx, _curThumb;
+    NSArray<NSString *> *_pendingPaths;   // 界面就绪前送来的文件先存这里
     NSWindow *_guide;
 
     NegFrame     _full, _proxy;
@@ -436,7 +491,8 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)a { return YES; }
 
 - (void)application:(NSApplication *)app openFiles:(NSArray<NSString *> *)files {
-    if (files.count) [self loadPath:files.firstObject];
+    if (!files.count) return;
+    [self setPaths:[files sortedArrayUsingSelector:@selector(compare:)]];
 }
 
 - (void)buildMenu {
@@ -679,6 +735,20 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
                                                  name:@"NegLabOpenURL" object:nil];
 
     // 四块交给 NegRoot 的 -layout 摆，这里只登记引用
+    _stripView = [[NegStrip alloc] initWithFrame:NSMakeRect(0, 0, 400, TH_H + 2 * TH_GAP)];
+    _thumbs = [NSMutableArray array];
+    _stripView.thumbs = _thumbs;
+    __weak NegApp *wss = self;
+    _stripView.onPick = ^(NSInteger i) { [wss jumpTo:i]; };
+    _stripBox = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 400, TH_H + 2 * TH_GAP)];
+    _stripBox.hasHorizontalScroller = YES;
+    _stripBox.hasVerticalScroller = NO;
+    _stripBox.autohidesScrollers = YES;
+    _stripBox.drawsBackground = NO;
+    _stripBox.documentView = _stripView;
+
+    [root addSubview:_stripBox];
+    root.strip  = _stripBox;
     root.canvas = _canvas;
     root.status = _lblStatus;
     root.hair   = hair;
@@ -689,6 +759,11 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     [_win center];
     [_win makeKeyAndOrderFront:nil];
     [self refreshEnabled];
+    if (_pendingPaths) {                        // 补上启动时送进来的那批文件
+        NSArray<NSString *> *p = _pendingPaths;
+        _pendingPaths = nil;
+        [self setPaths:p];
+    }
 }
 
 // ── 工具栏 ─────────────────────────────────────────────────────────────────
@@ -734,13 +809,68 @@ static NSString *const TB_HELP  = @"help";
 }
 
 // ── 载入 ───────────────────────────────────────────────────────────────────
+// ── 批量导入与胶片条 ───────────────────────────────────────────────────────
+- (void)setPaths:(NSArray<NSString *> *)paths {
+    if (!_stripView) {                          // 界面还没搭好：存起来，等就绪后再走一遍
+        _pendingPaths = [paths copy];
+        return;
+    }                    // 界面还没搭好就先不走这条
+    _paths = [NSMutableArray arrayWithArray:paths];
+    _thumbs = [NSMutableArray array];
+    for (NSUInteger i = 0; i < _paths.count; i++) [_thumbs addObject:(NSImage *)NSNull.null];
+    _curIdx = 0; _curThumb = 0;
+    _stripView.thumbs = _thumbs;
+    _stripView.sel = 0;
+    if (_paths.count) [self loadPath:_paths[0]];
+    if (_paths.count > 1) [self buildThumbs];
+}
+
+- (void)jumpTo:(NSInteger)i {
+    if (i < 0 || i >= (NSInteger)_paths.count) return;
+    [self loadPath:_paths[(NSUInteger)i]];
+}
+
+// 缩略图一帧一帧在主线程做（performSelector 排队），不做后台线程 ——
+// 避免上次那个「AppKit 方法在后台调用会抛异常」的坑。每帧之间隔 0.05s，
+// 界面在两帧之间是响应的。36 帧全程约 10 秒，可接受。
+- (void)buildThumbs {
+    if (_curThumb < 0 || _curThumb >= (NSInteger)_paths.count) return;
+    NSString *path = _paths[(NSUInteger)_curThumb];
+    NegFrame f; char e[64] = {0}, er[128] = {0};
+    if (negLoadFrame(path.UTF8String, &f, e, sizeof(e), er, sizeof(er)) == 0) {
+        NegFrame sm = negDownsample(&f, 200);
+        negFreeFrame(&f);
+        if (sm.rgb) {
+            double t0[3]; negEstimateZero(sm.rgb, sm.w, sm.h, 0.0005, t0);
+            double off2[3]; [self effOffset:off2];
+            negInvert(sm.rgb, sm.w * sm.h, t0, _gamma, off2, _lRef,
+                      NEG_PI_CLIP_DEFAULT, _paper);
+            float hi = negGreenPercentile(sm.rgb, sm.w, sm.h, DISP_PCT);
+            NSImage *im = [self imageFromRGBA:negRGBA8(sm.rgb, sm.w, sm.h,
+                                                       hi > 1e-6f ? hi : 1e-6f)];
+            negFreeFrame(&sm);
+            if (im && _curThumb < (NSInteger)_thumbs.count) {
+                _thumbs[(NSUInteger)_curThumb] = im;
+                _stripView.needsDisplay = YES;      // 只刷新，不重建 frame
+            }
+        }
+    }
+    _curThumb++;
+    if (_curThumb < (NSInteger)_paths.count)
+        [self performSelector:@selector(buildThumbs) withObject:nil afterDelay:0.05];
+}
+
 - (void)openDoc:(id)s {
     NSOpenPanel *p = [NSOpenPanel openPanel];
-    p.allowsMultipleSelection = NO;
+    p.allowsMultipleSelection = YES;
     p.canChooseDirectories = NO;
     p.message = @"选一张负片：店家扫的 TIFF，或你自己翻拍的相机 raw。";
     if ([p runModal] != NSModalResponseOK) return;
-    [self loadPath:p.URL.path];
+    NSMutableArray<NSString *> *ps = [NSMutableArray array];
+    for (NSURL *u in p.URLs) if (u.isFileURL) [ps addObject:u.path];
+    if (!ps.count) return;
+    [ps sortUsingSelector:@selector(compare:)];
+    [self setPaths:ps];
 }
 
 - (void)loadPath:(NSString *)path {
@@ -791,7 +921,17 @@ static NSString *const TB_HELP  = @"help";
             self->_mode = 0;
             self->_canvas.picking = NO;
             self->_currentPath = path;
-            self->_segZero.selectedSegment = 0;
+            NSUInteger idx = [self->_paths indexOfObject:path];
+            if (idx == NSNotFound) {
+                self->_paths = [NSMutableArray arrayWithObject:path];
+                self->_thumbs = [NSMutableArray arrayWithObject:(NSImage *)NSNull.null];
+                self->_stripView.thumbs = self->_thumbs;
+                idx = 0;
+            }
+            self->_curIdx = (NSInteger)idx;
+            self->_stripView.sel = (NSInteger)idx;
+            self->_segZero.selectedSegment = 0;   // ★ 不要在这里复位 _curThumb：
+
             self->_hasLockedT0 = NO;
             self->_chkLock.state = NSControlStateValueOff;
             self->_lblFile.stringValue = path.lastPathComponent;
