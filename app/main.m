@@ -820,7 +820,7 @@ static NSString *const TB_HELP  = @"help";
 // 画面缩放不参与 —— 否则同一块灰在窗口大小不同时给出不同答案。
 // 具体的抽样规则在 negSamplePatch() 里（tools/calib_cli 走的是同一个函数）。
 - (void)sampleAt:(double)nx y:(double)ny out:(double *)out {
-    negSamplePatch(&_full, nx, ny, 7, out);
+    negSamplePatch(&_full, nx, ny, 40, out);
 }
 
 - (void)handleClickX:(double)nx y:(double)ny {
