@@ -552,7 +552,13 @@ static NegCard *mkCard(NSString *title, NSArray<NSView *> *rows) {
     }
     _lblHealth = mkHelp(@"");
     NegCard *cardOut = mkCard(@"③ 输出　Y/M/C = 印片机滤色片（CC）",
-        @[_slExposure, _slY, _slM, _slC, _lblHealth]);
+        @[_slExposure, _slY, _slM, _slC,
+          mkHelp(@"Y/M/C 是印片机的滤色片，单位 CC：1 CC ≈ 0.01 密度，30 CC ≈ 1 档。\n"
+                 @"0 CC = 本次标定确定的中性 —— 所以先把标定做掉，这里的零点才有意义。\n"
+                 @"方向与暗房一致：加 Y 偏蓝、加 M 偏绿、加 C 偏红。\n"
+                 @"但 CYM 只能改「整体偏色」，改不了「逐颜色的误差」—— 饱和色上的残余，"
+                 @"调它治不了，得靠色靶标定。"),
+          _lblHealth]);
 
     // ── 组装 ──
     NSStackView *stack = vstack(@[cardFile, cardZero, cardGamma, cardOut], GAP_CARD);
